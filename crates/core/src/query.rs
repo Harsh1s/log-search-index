@@ -1098,3 +1098,553 @@ mod tests {
             ])
         );
     }
+
+    #[test]
+    fn three_clauses_with_time_range() {
+        assert_eq!(
+            parse("tag=api AND level=error AND last 30m").unwrap(),
+            one_group(vec![
+                cmp("tag", CompareOp::Eq, QueryValue::String("api".into())),
+                cmp("level", CompareOp::Eq, QueryValue::String("error".into())),
+                Clause::LastDuration(Duration {
+                    amount: 30,
+                    unit: DurationUnit::Minutes
+                }),
+            ])
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // OR — new in v0.2.0
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn single_or_two_groups() {
+        // Most common shape: same field, two values.
+        assert_eq!(
+            parse("level=error OR level=warn").unwrap(),
+            or_of(vec![
+                vec![cmp(
+                    "level",
+                    CompareOp::Eq,
+                    QueryValue::String("error".into())
+                )],
+                vec![cmp(
+                    "level",
+                    CompareOp::Eq,
+                    QueryValue::String("warn".into())
+                )],
+            ])
+        );
+    }
+
+    #[test]
+    fn or_is_case_insensitive() {
+        let lowered = parse("level=error or level=warn").unwrap();
+        let upper = parse("level=error OR level=warn").unwrap();
+        let mixed = parse("level=error Or level=warn").unwrap();
+        assert_eq!(lowered, upper);
+        assert_eq!(lowered, mixed);
+    }
+
+    #[test]
+    fn three_or_groups() {
+        assert_eq!(
+            parse("level=error OR level=warn OR level=fatal").unwrap(),
+            or_of(vec![
+                vec![cmp(
+                    "level",
+                    CompareOp::Eq,
+                    QueryValue::String("error".into())
+                )],
+                vec![cmp(
+                    "level",
+                    CompareOp::Eq,
+                    QueryValue::String("warn".into())
+                )],
+                vec![cmp(
+                    "level",
+                    CompareOp::Eq,
+                    QueryValue::String("fatal".into())
+                )],
+            ])
+        );
+    }
+
+    #[test]
+    fn or_with_mixed_clause_types() {
+        // Each side of OR can be any kind of clause: compare, contains,
+        // or time range. They mix freely.
+        assert_eq!(
+            parse(r#"level=error OR message contains "timeout" OR last 30m"#).unwrap(),
+            or_of(vec![
+                vec![cmp(
+                    "level",
+                    CompareOp::Eq,
+                    QueryValue::String("error".into())
+                )],
+                vec![Clause::Contains {
+                    field: "message".into(),
+                    value: "timeout".into(),
+                }],
+                vec![Clause::LastDuration(Duration {
+                    amount: 30,
+                    unit: DurationUnit::Minutes
+                })],
+            ])
+        );
+    }
+
+    #[test]
+    fn and_binds_tighter_than_or() {
+        // `a=1 AND b=2 OR c=3` parses as `(a=1 AND b=2) OR (c=3)`.
+        assert_eq!(
+            parse("a=1 AND b=2 OR c=3").unwrap(),
+            or_of(vec![
+                vec![
+                    cmp("a", CompareOp::Eq, QueryValue::Integer(1)),
+                    cmp("b", CompareOp::Eq, QueryValue::Integer(2)),
+                ],
+                vec![cmp("c", CompareOp::Eq, QueryValue::Integer(3))],
+            ])
+        );
+    }
+
+    #[test]
+    fn or_then_and_groups_correctly() {
+        // `a=1 OR b=2 AND c=3` parses as `(a=1) OR (b=2 AND c=3)`.
+        assert_eq!(
+            parse("a=1 OR b=2 AND c=3").unwrap(),
+            or_of(vec![
+                vec![cmp("a", CompareOp::Eq, QueryValue::Integer(1))],
+                vec![
+                    cmp("b", CompareOp::Eq, QueryValue::Integer(2)),
+                    cmp("c", CompareOp::Eq, QueryValue::Integer(3)),
+                ],
+            ])
+        );
+    }
+
+    #[test]
+    fn or_with_and_on_both_sides() {
+        // `a=1 AND b=2 OR c=3 AND d=4` →
+        //   `(a=1 AND b=2) OR (c=3 AND d=4)`.
+        assert_eq!(
+            parse("a=1 AND b=2 OR c=3 AND d=4").unwrap(),
+            or_of(vec![
+                vec![
+                    cmp("a", CompareOp::Eq, QueryValue::Integer(1)),
+                    cmp("b", CompareOp::Eq, QueryValue::Integer(2)),
+                ],
+                vec![
+                    cmp("c", CompareOp::Eq, QueryValue::Integer(3)),
+                    cmp("d", CompareOp::Eq, QueryValue::Integer(4)),
+                ],
+            ])
+        );
+    }
+
+    #[test]
+    fn or_combines_with_time_ranges() {
+        // Common in practice: "errors in the last hour OR fatal ever".
+        assert_eq!(
+            parse("level=error AND last 1h OR level=fatal").unwrap(),
+            or_of(vec![
+                vec![
+                    cmp("level", CompareOp::Eq, QueryValue::String("error".into())),
+                    Clause::LastDuration(Duration {
+                        amount: 1,
+                        unit: DurationUnit::Hours
+                    }),
+                ],
+                vec![cmp(
+                    "level",
+                    CompareOp::Eq,
+                    QueryValue::String("fatal".into())
+                )],
+            ])
+        );
+    }
+
+    #[test]
+    fn no_or_present_still_wraps_in_or_node() {
+        // The "always wrap" invariant — even a single AND-group is
+        // structurally `Or(vec![one_group])`.
+        match parse("level=error").unwrap() {
+            QueryNode::Or(groups) => {
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0].clauses.len(), 1);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // OR error cases
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn trailing_or_is_an_error() {
+        let err = parse("level=error OR").unwrap_err();
+        assert!(err.message.contains("OR"));
+        assert!(err.message.contains("clause"));
+    }
+
+    #[test]
+    fn leading_or_is_an_error() {
+        let err = parse("OR level=error").unwrap_err();
+        assert!(err.message.contains("OR"));
+    }
+
+    #[test]
+    fn double_or_is_an_error() {
+        let err = parse("level=error OR OR level=warn").unwrap_err();
+        assert!(err.message.contains("clause"));
+    }
+
+    #[test]
+    fn or_followed_by_and_is_an_error() {
+        let err = parse("level=error OR AND level=warn").unwrap_err();
+        assert!(err.message.contains("clause"));
+    }
+
+    #[test]
+    fn trailing_and_is_an_error() {
+        let err = parse("level=error AND").unwrap_err();
+        assert!(err.message.contains("AND"));
+        assert!(err.message.contains("clause"));
+    }
+
+    #[test]
+    fn leading_and_is_an_error() {
+        let err = parse("AND level=error").unwrap_err();
+        assert!(err.message.contains("AND"));
+    }
+
+    #[test]
+    fn double_and_is_an_error() {
+        let err = parse("level=error AND AND service=api").unwrap_err();
+        assert!(err.message.contains("clause"));
+    }
+
+    #[test]
+    fn and_followed_by_or_is_an_error() {
+        let err = parse("level=error AND OR level=warn").unwrap_err();
+        assert!(err.message.contains("clause"));
+    }
+
+    // -----------------------------------------------------------------
+    // Error cases carried forward from v0.1
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn empty_query_is_an_error() {
+        let err = parse("").unwrap_err();
+        assert_eq!(err.position, 0);
+        assert!(err.message.contains("empty"));
+    }
+
+    #[test]
+    fn whitespace_only_query_is_an_error() {
+        let err = parse("   ").unwrap_err();
+        assert!(err.message.contains("empty"));
+    }
+
+    #[test]
+    fn missing_value_after_operator() {
+        let err = parse("level=").unwrap_err();
+        assert!(err.message.contains("value"));
+    }
+
+    #[test]
+    fn missing_operator_after_field() {
+        let err = parse("level").unwrap_err();
+        assert!(err.message.contains("operator"));
+    }
+
+    #[test]
+    fn unknown_duration_unit_names_the_unit() {
+        let err = parse("last 5y").unwrap_err();
+        assert!(err.message.contains("unit"));
+        assert!(err.message.contains("\"y\""));
+    }
+
+    #[test]
+    fn fractional_duration_rejected() {
+        let err = parse("last 1.5h").unwrap_err();
+        assert!(err.message.contains("whole number"));
+    }
+
+    #[test]
+    fn bang_without_equals_is_actionable() {
+        let err = parse("level!error").unwrap_err();
+        assert!(err.message.contains("!="));
+    }
+
+    #[test]
+    fn unterminated_quoted_string_points_at_opening_quote() {
+        let input = r#"service="oops"#;
+        let err = parse(input).unwrap_err();
+        assert_eq!(err.position, input.find('"').unwrap());
+        assert!(err.message.contains("unterminated"));
+    }
+
+    #[test]
+    fn contains_with_number_is_rejected() {
+        let err = parse("message contains 42").unwrap_err();
+        assert!(err.message.contains("string"));
+    }
+
+    #[test]
+    fn invalid_field_name_starting_with_digit() {
+        let err = parse("3foo=x").unwrap_err();
+        assert!(err.message.contains("field"));
+    }
+
+    #[test]
+    fn missing_and_or_or_between_clauses_is_actionable() {
+        let err = parse("level=error service=payments").unwrap_err();
+        // Updated message: parser now suggests AND or OR.
+        assert!(err.message.contains("AND") || err.message.contains("OR"));
+    }
+
+    #[test]
+    fn last_without_number() {
+        let err = parse("last h").unwrap_err();
+        assert!(err.message.contains("number"));
+    }
+
+    #[test]
+    fn last_without_unit() {
+        let err = parse("last 30").unwrap_err();
+        assert!(err.message.contains("unit"));
+    }
+
+    // -----------------------------------------------------------------
+    // validate_field_name direct tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn validate_field_name_rejects_hyphen() {
+        // The tokenizer allows `-` inside identifiers so bare-word values like
+        // `x-request-id` tokenize correctly. validate_field_name enforces the
+        // stricter field-name subset that disallows it.
+        assert!(validate_field_name("service-v2", 0).is_err());
+    }
+
+    #[test]
+    fn validate_field_name_rejects_colon() {
+        // `:` is allowed by the tokenizer (datetime literals), rejected here.
+        assert!(validate_field_name("a:b", 0).is_err());
+    }
+
+    #[test]
+    fn validate_field_name_rejects_bang() {
+        assert!(validate_field_name("field!", 0).is_err());
+    }
+
+    #[test]
+    fn validate_field_name_allows_dotted_field() {
+        assert!(validate_field_name("user.id", 0).is_ok());
+    }
+
+    #[test]
+    fn validate_field_name_allows_leading_underscore() {
+        assert!(validate_field_name("_private", 0).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // Tokenizer edge cases (carried forward from v0.1)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn tokens_survive_around_operators_with_no_spaces() {
+        assert_eq!(
+            parse("level=error").unwrap(),
+            parse("level = error").unwrap()
+        );
+        assert_eq!(parse("req_id!=5").unwrap(), parse("req_id != 5").unwrap());
+    }
+
+    #[test]
+    fn hyphenated_bare_word_value_parses() {
+        assert_eq!(
+            parse("request_id=x-request-1").unwrap(),
+            one_group(vec![cmp(
+                "request_id",
+                CompareOp::Eq,
+                QueryValue::String("x-request-1".into())
+            )])
+        );
+    }
+
+    #[test]
+    fn digit_led_value_with_hyphen_is_string_not_number() {
+        assert_eq!(
+            parse("version=1.2.3-beta").unwrap(),
+            one_group(vec![cmp(
+                "version",
+                CompareOp::Eq,
+                QueryValue::String("1.2.3-beta".into())
+            )])
+        );
+    }
+
+    #[test]
+    fn dotted_version_string_is_not_a_number() {
+        assert_eq!(
+            parse("version=1.2.3").unwrap(),
+            one_group(vec![cmp(
+                "version",
+                CompareOp::Eq,
+                QueryValue::String("1.2.3".into())
+            )])
+        );
+    }
+
+    #[test]
+    fn pure_digit_run_is_still_a_number() {
+        match &parse("req_id=100").unwrap() {
+            QueryNode::Or(groups) => {
+                assert_eq!(groups.len(), 1);
+                match &groups[0].clauses[0] {
+                    Clause::Compare {
+                        value: QueryValue::Integer(n),
+                        ..
+                    } => assert_eq!(*n, 100),
+                    other => panic!("expected Integer value, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Parenthesized expressions — new in v0.3.0
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn paren_single_clause_wraps_in_group() {
+        // `(level=error)` — one clause inside parens
+        let node = parse("(level=error)").unwrap();
+        match &node {
+            QueryNode::Or(groups) => {
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0].clauses.len(), 1);
+                assert!(matches!(&groups[0].clauses[0], Clause::Group(_)));
+            }
+        }
+    }
+
+    #[test]
+    fn paren_or_inside_and_produces_single_and_group_with_group_clause() {
+        // `(level=error OR level=warn) AND service=payments`
+        // The paren subexpr becomes a Clause::Group inside one AND-group.
+        let node = parse("(level=error OR level=warn) AND service=payments").unwrap();
+        match &node {
+            QueryNode::Or(groups) => {
+                assert_eq!(groups.len(), 1, "outer OR has one AND-group");
+                let clauses = &groups[0].clauses;
+                assert_eq!(clauses.len(), 2, "AND-group: Group + Compare");
+                assert!(matches!(&clauses[0], Clause::Group(_)));
+                assert!(matches!(&clauses[1], Clause::Compare { .. }));
+                // Inner group has two OR branches.
+                if let Clause::Group(inner) = &clauses[0] {
+                    match inner.as_ref() {
+                        QueryNode::Or(inner_groups) => assert_eq!(inner_groups.len(), 2),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paren_on_right_side_of_or_wraps_and_group() {
+        // `level=error OR (level=warn AND service=payments)`
+        let node = parse("level=error OR (level=warn AND service=payments)").unwrap();
+        match &node {
+            QueryNode::Or(groups) => {
+                assert_eq!(groups.len(), 2, "two OR branches");
+                // First branch: plain Compare
+                assert_eq!(groups[0].clauses.len(), 1);
+                assert!(matches!(&groups[0].clauses[0], Clause::Compare { .. }));
+                // Second branch: single Group clause containing an AND
+                assert_eq!(groups[1].clauses.len(), 1);
+                assert!(matches!(&groups[1].clauses[0], Clause::Group(_)));
+                if let Clause::Group(inner) = &groups[1].clauses[0] {
+                    match inner.as_ref() {
+                        QueryNode::Or(inner_groups) => {
+                            assert_eq!(inner_groups.len(), 1);
+                            assert_eq!(inner_groups[0].clauses.len(), 2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_parens_parse_correctly() {
+        // `((level=error))` — double-nested, legal
+        assert!(parse("((level=error))").is_ok());
+    }
+
+    #[test]
+    fn paren_with_time_range_inside() {
+        // `(level=error AND last 1h) OR level=warn`
+        assert!(parse("(level=error AND last 1h) OR level=warn").is_ok());
+    }
+
+    #[test]
+    fn paren_keywords_inside_are_case_insensitive() {
+        assert!(parse("(level=error OR level=warn)").is_ok());
+        assert!(parse("(level=error or level=warn)").is_ok());
+        assert!(parse("(level=error Or level=warn)").is_ok());
+    }
+
+    #[test]
+    fn unmatched_close_paren_is_error() {
+        let err = parse("level=error)").unwrap_err();
+        assert!(
+            err.message.contains(')') || err.message.contains("matching"),
+            "message was: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn unclosed_open_paren_is_error() {
+        let err = parse("(level=error").unwrap_err();
+        assert!(
+            err.message.contains(')')
+                || err.message.contains("close")
+                || err.message.contains("unclosed"),
+            "message was: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn empty_parens_is_error() {
+        let err = parse("()").unwrap_err();
+        assert!(!err.message.is_empty());
+    }
+
+    #[test]
+    fn paren_after_and_parses() {
+        // `level=error AND (service=payments OR service=api)`
+        assert!(parse("level=error AND (service=payments OR service=api)").is_ok());
+    }
+
+    #[test]
+    fn multiple_paren_groups_joined_by_and() {
+        // `(a=1 OR b=2) AND (c=3 OR d=4)`
+        let node = parse("(a=1 OR b=2) AND (c=3 OR d=4)").unwrap();
+        match &node {
+            QueryNode::Or(groups) => {
+                assert_eq!(groups.len(), 1);
+                assert_eq!(groups[0].clauses.len(), 2);
+                assert!(matches!(&groups[0].clauses[0], Clause::Group(_)));
+                assert!(matches!(&groups[0].clauses[1], Clause::Group(_)));
+            }
+        }
+    }
+}
