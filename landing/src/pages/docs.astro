@@ -1,0 +1,118 @@
+---
+import Base from '@layouts/Base.astro';
+import CodeBlock from '@components/CodeBlock.astro';
+import { CURRENT_VERSION } from '@data/roadmap';
+---
+<Base
+  title="Docs — logdive"
+  description="Documentation for logdive: CLI, HTTP API, query language, configuration."
+  activeNav="docs"
+>
+
+<div class="docs">
+
+  <aside class="docs-nav" aria-label="Documentation">
+    <h4>Get started</h4>
+    <ul>
+      <li><a href="#quick-start">Quick start</a></li>
+      <li><a href="#installation">Installation</a></li>
+    </ul>
+    <h4>The CLI</h4>
+    <ul>
+      <li><a href="#cli-ingest">ingest</a></li>
+      <li><a href="#cli-query">query</a></li>
+      <li><a href="#cli-stats">stats</a></li>
+      <li><a href="#cli-prune">prune</a></li>
+    </ul>
+    <h4>The HTTP API</h4>
+    <ul>
+      <li><a href="#api-query">/query</a></li>
+      <li><a href="#api-stats">/stats</a></li>
+      <li><a href="#api-version">/version</a></li>
+    </ul>
+    <h4>Reference</h4>
+    <ul>
+      <li><a href="#query-language">Query language</a></li>
+      <li><a href="#configuration">Configuration</a></li>
+      <li><a href="#docker">Docker</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+    </ul>
+  </aside>
+
+  <main class="docs-main">
+
+    <!-- QUICK START -->
+    <section id="quick-start">
+      <h2>Quick start</h2>
+      <p class="lede">Install the binary, ingest a log file, run a query. Five lines, no flags worth worrying about yet.</p>
+      <CodeBlock id="qs-block">
+<span class="prompt">$</span> cargo install logdive
+<span class="prompt">$</span> logdive ingest --file /var/log/app.log
+<span class="cm">  → 12,847 lines indexed in 78ms</span>
+<span class="prompt">$</span> logdive query <span class="str">'level=error last 1h'</span>
+<span class="prompt">$</span> logdive stats
+      </CodeBlock>
+      <p>By default, the index lives at <code class="code-inline">~/.logdive/index.db</code>. Override with <code class="code-inline">--db &lt;path&gt;</code> on any command, or set <code class="code-inline">LOGDIVE_DB</code>.</p>
+    </section>
+
+    <!-- INSTALLATION -->
+    <section id="installation">
+      <h2>Installation</h2>
+      <p>Three supported paths.</p>
+
+      <h3>From crates.io</h3>
+      <CodeBlock id="i-cargo">
+<span class="prompt">$</span> cargo install logdive
+<span class="prompt">$</span> cargo install logdive-api  <span class="cm"># optional, for the HTTP server</span>
+      </CodeBlock>
+
+      <h3>From Docker</h3>
+      <CodeBlock id="i-docker">
+<span class="prompt">$</span> docker pull ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION}
+      </CodeBlock>
+
+      <h3>From source</h3>
+      <CodeBlock id="i-source">
+<span class="prompt">$</span> git clone https://github.com/Aryagorjipour/logdive
+<span class="prompt">$</span> cd logdive
+<span class="prompt">$</span> cargo build --release
+      </CodeBlock>
+      <p class="lede">Resulting binaries: <code class="code-inline">logdive</code> at 3.8&thinsp;MB stripped, <code class="code-inline">logdive-api</code> at 4.1&thinsp;MB stripped. MSRV: Rust 1.85.</p>
+    </section>
+
+    <!-- CLI -->
+    <section id="cli-ingest">
+      <h2>The CLI</h2>
+      <p>One binary, four subcommands.</p>
+
+      <h3>ingest</h3>
+      <p>Reads a file or stdin, parses log lines, and inserts them into the SQLite index. Supports JSON (default), logfmt, and plain text. Deduplicates via blake3 content hash.</p>
+      <CodeBlock id="c-ingest">
+<span class="prompt">$</span> logdive ingest --file ./logs/app.log
+<span class="prompt">$</span> logdive ingest --file ./logs/app.log --format logfmt --tag production
+<span class="prompt">$</span> docker logs my-container | logdive ingest --tag my-container
+<span class="prompt">$</span> logdive ingest --file ./logs/app.log --follow
+      </CodeBlock>
+      <dl class="kv-list">
+        <dt>--file &lt;PATH&gt;</dt>
+        <dd>Read from a file. Mutually exclusive with stdin.</dd>
+        <dt>--format json|logfmt|plain</dt>
+        <dd>Input format. Default <code class="code-inline">json</code>.</dd>
+        <dt>--tag &lt;TAG&gt;</dt>
+        <dd>Attach a tag to every ingested entry that does not already have a <code class="code-inline">tag</code> field.</dd>
+        <dt>--timestamp-now</dt>
+        <dd>Assign current UTC time to entries lacking a <code class="code-inline">timestamp</code> field instead of skipping them.</dd>
+        <dt>--follow</dt>
+        <dd>Tail the file for new lines, similar to <code class="code-inline">tail -f</code>. Detects log rotation and truncation. Requires <code class="code-inline">--file</code>. Unix only (Windows support is v0.4+).</dd>
+        <dt>--db &lt;PATH&gt;</dt>
+        <dd>Database path override. Default <code class="code-inline">~/.logdive/index.db</code>. Also settable via <code class="code-inline">LOGDIVE_DB</code>.</dd>
+      </dl>
+
+      <h3 id="cli-query">query</h3>
+      <p>Evaluates a query expression and prints matching rows.</p>
+      <CodeBlock id="c-query">
+<span class="prompt">$</span> logdive query <span class="str">'level=error AND service=payments last 2h'</span>
+<span class="prompt">$</span> logdive query <span class="str">'(level=error OR level=warn) AND service=payments'</span>
+<span class="prompt">$</span> logdive query <span class="str">'level=error OR level=warn'</span> --output json
+<span class="prompt">$</span> logdive query <span class="str">'message contains "timeout" last 24h'</span>
+<span class="prompt">$</span> logdive query <span class="str">'since 2026-01-01'</span> --limit 0 --offset 200
