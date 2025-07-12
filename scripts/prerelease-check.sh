@@ -152,3 +152,80 @@ echo "OK: binaries are under the size limit."
 # strips the `path = ...` portion of the `logdive-core` workspace
 # dependency and tries to resolve `logdive-core = "0.1.0"` against
 # crates.io. Since we haven't published core yet, that lookup fails.
+#
+# Cargo 1.90+ supports `cargo publish --workspace --dry-run`, which
+# uses an internal local-registry overlay to resolve the unpublished
+# transitive dependencies. We detect the Cargo version and use it
+# when available.
+#
+# On older Cargo (pre-1.90), we fall back to verifying only
+# `logdive-core`. The cli and api crates will be validated at real
+# publish time, after core is live on crates.io.
+
+# Extract Cargo's major.minor version number. `cargo --version` prints
+# a line like: "cargo 1.86.0 (824adfb12 2025-03-22)". We parse the
+# first two numeric components.
+CARGO_VERSION_LINE=$(cargo --version)
+CARGO_MINOR=$(echo "$CARGO_VERSION_LINE" \
+  | sed -E 's/^cargo ([0-9]+)\.([0-9]+)\..*$/\2/')
+CARGO_MAJOR=$(echo "$CARGO_VERSION_LINE" \
+  | sed -E 's/^cargo ([0-9]+)\.([0-9]+)\..*$/\1/')
+
+# Sanity-check the parse. If either part is non-numeric, treat as old.
+case "$CARGO_MAJOR" in
+  *[!0-9]*|'') CARGO_MAJOR=0 ;;
+esac
+case "$CARGO_MINOR" in
+  *[!0-9]*|'') CARGO_MINOR=0 ;;
+esac
+
+# `cargo publish --workspace` on stable requires Cargo >= 1.90.
+USE_WORKSPACE_DRY_RUN=0
+if [ "$CARGO_MAJOR" -gt 1 ]; then
+  USE_WORKSPACE_DRY_RUN=1
+elif [ "$CARGO_MAJOR" -eq 1 ] && [ "$CARGO_MINOR" -ge 90 ]; then
+  USE_WORKSPACE_DRY_RUN=1
+fi
+
+if [ "$USE_WORKSPACE_DRY_RUN" -eq 1 ]; then
+  step "Dry-run: cargo publish --workspace (cargo ${CARGO_MAJOR}.${CARGO_MINOR})"
+  cargo publish --dry-run --workspace --allow-dirty
+  echo "OK: all three crates package and verify cleanly as a workspace."
+else
+  step "Dry-run: logdive-core (cargo ${CARGO_MAJOR}.${CARGO_MINOR} — partial verification)"
+  echo "note: cargo 1.90+ enables verifying all three crates together."
+  echo "      your toolchain is older; only logdive-core is fully verified."
+  echo "      cli and api will be validated at real publish time instead."
+  cargo publish --dry-run -p logdive-core --allow-dirty
+  echo "OK: logdive-core packages cleanly."
+fi
+
+# ---------------------------------------------------------------------
+# 11. CHANGELOG has a non-TBD date for this version.
+# ---------------------------------------------------------------------
+
+step "Verifying CHANGELOG date"
+if grep -qE "^## \[$VERSION\] - [0-9]{4}-[0-9]{2}-[0-9]{2}" CHANGELOG.md; then
+  echo "OK: CHANGELOG.md has a dated entry for $VERSION."
+else
+  fail "CHANGELOG.md does not have a dated entry for $VERSION. Update the date from 'TBD' to today's date in YYYY-MM-DD format."
+fi
+
+# ---------------------------------------------------------------------
+# Summary.
+# ---------------------------------------------------------------------
+
+echo ""
+echo "=============================================================="
+echo "All pre-release checks passed."
+echo ""
+echo "Next steps:"
+echo "  1. git tag -a v$VERSION -m 'v$VERSION'"
+echo "  2. git push origin main v$VERSION"
+echo "  3. Wait for the release workflow to build and publish binaries."
+echo "  4. Publish to crates.io in dependency order:"
+echo "       cargo publish -p logdive-core"
+echo "       cargo publish -p logdive"
+echo "       cargo publish -p logdive-api"
+echo "     (allow ~30 seconds between each publish for the index to propagate)"
+echo "=============================================================="
