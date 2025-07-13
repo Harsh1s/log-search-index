@@ -116,3 +116,239 @@ import { CURRENT_VERSION } from '@data/roadmap';
 <span class="prompt">$</span> logdive query <span class="str">'level=error OR level=warn'</span> --output json
 <span class="prompt">$</span> logdive query <span class="str">'message contains "timeout" last 24h'</span>
 <span class="prompt">$</span> logdive query <span class="str">'since 2026-01-01'</span> --limit 0 --offset 200
+      </CodeBlock>
+      <dl class="kv-list">
+        <dt>--output pretty|json</dt>
+        <dd>Output format. Default <code class="code-inline">pretty</code> (colored). <code class="code-inline">json</code> is newline-delimited, pipe-friendly.</dd>
+        <dt>--limit &lt;N&gt;</dt>
+        <dd>Maximum results. Default 1000. Use <code class="code-inline">0</code> for unlimited.</dd>
+        <dt>--offset &lt;N&gt;</dt>
+        <dd>Skip the first N results. Use with <code class="code-inline">--limit</code> for page navigation. Default 0.</dd>
+        <dt>--db &lt;PATH&gt;</dt>
+        <dd>Database path override.</dd>
+      </dl>
+
+      <h3 id="cli-stats">stats</h3>
+      <p>Reports aggregate metadata about the index — row count, time range, tags, and DB size on disk.</p>
+      <CodeBlock id="c-stats">
+<span class="prompt">$</span> logdive stats
+<span class="cm">logdive index: /home/user/.logdive/index.db
+  Entries:       42,317
+  Time range:    2026-03-14T08:22:01Z → 2026-04-22T19:45:03Z
+  Tags:          api, nginx, payments, worker, (untagged)
+  DB size:       8.4 MB (8,400,000 bytes)</span>
+      </CodeBlock>
+
+      <h3 id="cli-prune">prune</h3>
+      <p>Deletes entries outside a retention window, then vacuums the database file to reclaim disk space. Safe for cron.</p>
+      <CodeBlock id="c-prune">
+<span class="prompt">$</span> logdive prune --older-than 30d
+<span class="prompt">$</span> logdive prune --before 2026-01-01
+<span class="prompt">$</span> logdive prune --older-than 7d --yes
+      </CodeBlock>
+      <dl class="kv-list">
+        <dt>--older-than &lt;DURATION&gt;</dt>
+        <dd>Delete entries older than this. Format: integer + <code class="code-inline">m</code>, <code class="code-inline">h</code>, or <code class="code-inline">d</code>. E.g. <code class="code-inline">30d</code>, <code class="code-inline">24h</code>. Mutually exclusive with <code class="code-inline">--before</code>.</dd>
+        <dt>--before &lt;DATETIME&gt;</dt>
+        <dd>Delete entries before this datetime. Accepts RFC 3339, ISO naive datetime, or ISO date. Mutually exclusive with <code class="code-inline">--older-than</code>.</dd>
+        <dt>--yes</dt>
+        <dd>Skip the interactive <code class="code-inline">[y/N]</code> confirmation. Useful in scripts and cron.</dd>
+        <dt>--db &lt;PATH&gt;</dt>
+        <dd>Database path override.</dd>
+      </dl>
+    </section>
+
+    <!-- HTTP API -->
+    <section id="api-query">
+      <h2>The HTTP API</h2>
+      <p>The <code class="code-inline">logdive-api</code> binary serves the same query language over HTTP, read-only. No authentication — bind it to localhost.</p>
+      <CodeBlock id="api-run">
+<span class="prompt">$</span> logdive-api --db ~/.logdive/index.db --port 4000
+      </CodeBlock>
+
+      <h3>GET /query</h3>
+      <p>Runs a query and returns matching entries as newline-delimited JSON.</p>
+      <dl class="kv-list">
+        <dt>q (required)</dt>
+        <dd>Query expression. URL-encoded. Same syntax as CLI.</dd>
+        <dt>limit (optional)</dt>
+        <dd>Maximum results. Default 1000. <code class="code-inline">0</code> for unlimited.</dd>
+        <dt>offset (optional)</dt>
+        <dd>Skip the first N results. Default 0. Use with <code class="code-inline">limit</code> for pagination.</dd>
+      </dl>
+      <CodeBlock id="api-q">
+<span class="prompt">$</span> curl <span class="str">'http://127.0.0.1:4000/query?q=level%3Derror&amp;limit=50'</span>
+<span class="cm">&#123;"timestamp":"2026-05-21T14:02:31Z","level":"error","message":"..."&#125;
+&#123;"timestamp":"2026-05-21T14:02:33Z","level":"error","message":"..."&#125;</span>
+      </CodeBlock>
+
+      <h3 id="api-stats">GET /stats</h3>
+      <p>Returns aggregate metadata as a single JSON object.</p>
+      <CodeBlock id="api-stats-ex">
+<span class="cm">&#123;
+  "entries": 42317,
+  "min_timestamp": "2026-03-14T08:22:01Z",
+  "max_timestamp": "2026-04-22T19:45:03Z",
+  "tags": [null, "api", "nginx", "payments", "worker"],
+  "db_size_bytes": 8400000,
+  "db_path": "/home/user/.logdive/index.db"
+&#125;</span>
+      </CodeBlock>
+
+      <h3 id="api-version">GET /version</h3>
+      <p>Returns build version and supported capabilities. Never touches the database. Use as a liveness probe.</p>
+      <CodeBlock id="api-version-ex">
+<span class="cm">&#123;
+  "version": "{CURRENT_VERSION}",
+  "formats": ["json", "logfmt", "plain"],
+  "capabilities": ["query", "stats", "version"]
+&#125;</span>
+      </CodeBlock>
+    </section>
+
+    <!-- QUERY LANGUAGE -->
+    <section id="query-language">
+      <h2>Query language</h2>
+      <p class="lede">Boolean expressions over fields, plus an optional trailing time window. Fields can be indexed columns (<code class="code-inline">timestamp</code>, <code class="code-inline">level</code>, <code class="code-inline">message</code>, <code class="code-inline">tag</code>) or arbitrary JSON paths (<code class="code-inline">user.id</code>, <code class="code-inline">request.method</code>).</p>
+
+      <h3>Grammar</h3>
+      <div class="grammar"><span class="nt">query</span>      <span class="tok">::=</span> <span class="nt">or_expr</span> [ <span class="nt">time_range</span> ]
+<span class="nt">or_expr</span>    <span class="tok">::=</span> <span class="nt">and_expr</span> ( <span class="tok">"OR"</span> <span class="nt">and_expr</span> )*
+<span class="nt">and_expr</span>   <span class="tok">::=</span> <span class="nt">clause</span> ( <span class="tok">"AND"</span> <span class="nt">clause</span> )*
+<span class="nt">clause</span>     <span class="tok">::=</span> <span class="nt">field</span> <span class="nt">op</span> <span class="nt">value</span> | <span class="nt">field</span> <span class="tok">"CONTAINS"</span> <span class="nt">string</span> | <span class="tok">"("</span> <span class="nt">or_expr</span> <span class="tok">")"</span>
+<span class="nt">op</span>         <span class="tok">::=</span> <span class="tok">"="</span> | <span class="tok">"!="</span> | <span class="tok">">"</span> | <span class="tok">"&lt;"</span>
+<span class="nt">field</span>      <span class="tok">::=</span> <span class="nt">ident</span> ( <span class="tok">"."</span> <span class="nt">ident</span> )*
+<span class="nt">value</span>      <span class="tok">::=</span> <span class="nt">ident</span> | <span class="nt">number</span> | <span class="nt">quoted_string</span>
+<span class="nt">time_range</span> <span class="tok">::=</span> <span class="tok">"last"</span> <span class="nt">duration</span> | <span class="tok">"since"</span> <span class="nt">datetime</span>
+<span class="nt">duration</span>   <span class="tok">::=</span> <span class="nt">number</span> ( <span class="tok">"m"</span> | <span class="tok">"h"</span> | <span class="tok">"d"</span> )</div>
+      <p>Keywords are case-insensitive. <code class="code-inline">AND</code> binds tighter than <code class="code-inline">OR</code>; use parentheses to override precedence.</p>
+
+      <h3>Operators</h3>
+      <dl class="kv-list">
+        <dt>=</dt><dd>Exact match. Hits an index on known fields.</dd>
+        <dt>!=</dt><dd>Negation of <code class="code-inline">=</code>. Still indexed.</dd>
+        <dt>&gt;, &lt;</dt><dd>Numeric or lexicographic comparison.</dd>
+        <dt>CONTAINS</dt><dd>Case-insensitive substring match. Full-table scan on the target field.</dd>
+        <dt>AND</dt><dd>Binds clauses within a group. Tighter precedence than OR.</dd>
+        <dt>OR</dt><dd>Separates AND groups. Each group is evaluated independently.</dd>
+        <dt>last &lt;N&gt;m|h|d</dt><dd>Time window ending now.</dd>
+        <dt>since &lt;datetime&gt;</dt><dd>Absolute lower bound. RFC 3339, ISO naive datetime, or ISO date.</dd>
+      </dl>
+
+      <h3>Examples</h3>
+      <CodeBlock id="ql-ex">
+<span class="cm"># All errors from payments in the last 2 hours</span>
+level=error AND service=payments last 2h
+
+<span class="cm"># Errors OR warnings</span>
+level=error OR level=warn
+
+<span class="cm"># Parentheses for explicit precedence</span>
+(level=error OR level=warn) AND service=payments
+
+<span class="cm"># AND within each OR branch (no parens needed — AND binds tighter)</span>
+level=error AND service=payments OR level=warn AND tag=worker
+
+<span class="cm"># Case-insensitive level match (ERROR, error, Error all hit the same rows)</span>
+level=ERROR AND service=payments
+
+<span class="cm"># Substring search on the message body</span>
+message contains <span class="str">"timeout"</span> last 24h
+
+<span class="cm"># Slow requests over 500ms</span>
+duration_ms &gt; 500
+
+<span class="cm"># Time range by absolute date</span>
+since 2026-04-15T09:00:00Z
+      </CodeBlock>
+    </section>
+
+    <!-- CONFIGURATION -->
+    <section id="configuration">
+      <h2>Configuration</h2>
+      <p>All configuration is via command-line flags, with environment-variable fallbacks for containerised deployments.</p>
+      <dl class="kv-list">
+        <dt>LOGDIVE_DB</dt>
+        <dd>Database path. Fallback for <code class="code-inline">--db</code>. Default <code class="code-inline">~/.logdive/index.db</code>.</dd>
+        <dt>LOGDIVE_LOG</dt>
+        <dd>Verbosity filter for internal diagnostics (<code class="code-inline">tracing_subscriber::EnvFilter</code>). Default <code class="code-inline">warn</code>.</dd>
+        <dt>LOGDIVE_API_PORT</dt>
+        <dd>Port for <code class="code-inline">logdive-api</code>. Fallback for <code class="code-inline">--port</code>. Default <code class="code-inline">4000</code>.</dd>
+        <dt>LOGDIVE_API_HOST</dt>
+        <dd>Bind host for <code class="code-inline">logdive-api</code>. Fallback for <code class="code-inline">--host</code>. Default <code class="code-inline">127.0.0.1</code>.</dd>
+        <dt>LOGDIVE_API_CORS_ORIGINS</dt>
+        <dd>Allowed CORS origins. Comma-separated list or <code class="code-inline">*</code>. Default: disabled.</dd>
+        <dt>NO_COLOR</dt>
+        <dd>Suppress ANSI colour in <code class="code-inline">logdive query</code> output when set.</dd>
+      </dl>
+    </section>
+
+    <!-- DOCKER -->
+    <section id="docker">
+      <h2>Docker</h2>
+      <p>Multi-arch images (linux/amd64 and linux/arm64) published to GHCR on every merge to main and every version tag.</p>
+      <CodeBlock id="dk-1">
+<span class="cm"># Start the API server</span>
+<span class="prompt">$</span> docker volume create logdive-data
+<span class="prompt">$</span> docker run -d \
+    --name logdive \
+    -v logdive-data:/data \
+    -p 4000:4000 \
+    ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION}
+      </CodeBlock>
+      <CodeBlock id="dk-2">
+<span class="cm"># Ingest with the CLI against the same volume</span>
+<span class="prompt">$</span> docker run --rm \
+    -v logdive-data:/data \
+    -v /path/to/your/logs:/logs:ro \
+    --entrypoint logdive \
+    ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION} \
+    ingest --file /logs/app.log --tag production
+      </CodeBlock>
+      <p>Default entrypoint is <code class="code-inline">logdive-api</code>. The image pre-sets <code class="code-inline">LOGDIVE_DB=/data/index.db</code> and <code class="code-inline">LOGDIVE_API_HOST=0.0.0.0</code>. Runtime is <code class="code-inline">gcr.io/distroless/cc-debian12:nonroot</code> — no shell, no curl, no root. HEALTHCHECK uses <code class="code-inline">logdive-api --health-check</code>, which opens a TCP connection to the server's own port via stdlib — no HTTP client required.</p>
+    </section>
+
+    <!-- ARCHITECTURE -->
+    <section id="architecture">
+      <h2>Architecture</h2>
+      <p>A Cargo workspace with three crates. <code class="code-inline">logdive-core</code> is publishable to crates.io as a standalone library.</p>
+      <CodeBlock id="arch-tree-docs">
+logdive/
+├── <span class="kw">logdive-core</span>     <span class="cm">// library: parsers, indexer, query AST+parser, executor</span>
+├── <span class="kw">logdive</span>          <span class="cm">// CLI binary — clap, follow mode, render, progress</span>
+└── <span class="kw">logdive-api</span>      <span class="cm">// HTTP server — axum, read-only, tokio</span>
+      </CodeBlock>
+      <h3>Storage model</h3>
+      <p>Hybrid schema: <code class="code-inline">timestamp</code>, <code class="code-inline">level</code>, <code class="code-inline">message</code>, <code class="code-inline">tag</code> are indexed columns. Everything else is stored in a <code class="code-inline">fields TEXT</code> JSON blob and queried at read time via SQLite's <code class="code-inline">json_extract()</code>. Deduplication uses a <code class="code-inline">raw_hash UNIQUE</code> column with blake3 hashes and <code class="code-inline">INSERT OR IGNORE</code>.</p>
+      <h3>Why SQLite</h3>
+      <p>Zero infrastructure. A single file, transactional, with a query planner that handles indexes, joins, and aggregates. The interesting work is the query parser and the storage schema; SQLite handles the rest.</p>
+      <h3>Why Rust</h3>
+      <p>Parsing log lines at 200k/s with near-zero GC budget. The ingest path is where Rust earns its place. The query path is mostly SQL.</p>
+    </section>
+
+  </main>
+</div>
+
+<script>
+  const docsNav = document.querySelector('.docs-nav');
+  if (docsNav) {
+    const links = Array.from(docsNav.querySelectorAll<HTMLAnchorElement>('a[href^="#"]'));
+    const sections = links
+      .map(a => document.getElementById(a.getAttribute('href')!.slice(1)))
+      .filter((s): s is HTMLElement => s !== null);
+
+    const observer = new IntersectionObserver(
+      entries => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            const id = entry.target.id;
+            links.forEach(a => a.classList.toggle('is-active', a.getAttribute('href') === `#${id}`));
+          }
+        });
+      },
+      { rootMargin: '-80px 0px -70% 0px', threshold: 0 }
+    );
+    sections.forEach(s => observer.observe(s));
+  }
+</script>
+
