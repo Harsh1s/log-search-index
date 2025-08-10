@@ -72,3 +72,40 @@ python3 -m scripts <absolute_filepath>
 
 CRITICAL RULE:
 Anything inside ``` ... ``` must be copied EXACTLY.
+Do not:
+- remove comments
+- remove spacing
+- reorder lines
+- shorten commands
+- simplify anything
+
+Inline code (`...`) must be preserved EXACTLY.
+Do not modify anything inside backticks.
+
+If file contains code blocks:
+- Treat code blocks as read-only regions
+- Only compress text outside them
+- Do not merge sections around code
+
+## Pattern
+
+Original:
+> You should always make sure to run the test suite before pushing any changes to the main branch. This is important because it helps catch bugs early and prevents broken builds from being deployed to production.
+
+Compressed:
+> Run tests before push to main. Catch bugs early, prevent broken prod deploys.
+
+Original:
+> The application uses a microservices architecture with the following components. The API gateway handles all incoming requests and routes them to the appropriate service. The authentication service is responsible for managing user sessions and JWT tokens.
+
+Compressed:
+> Microservices architecture. API gateway route all requests to services. Auth service manage user sessions + JWT tokens.
+
+## Boundaries
+
+- ONLY compress natural language files (.md, .txt, .typ, .typst, .tex, extensionless)
+- NEVER modify: .py, .js, .ts, .json, .yaml, .yml, .toml, .env, .lock, .css, .html, .xml, .sql, .sh
+- If file has mixed content (prose + code), compress ONLY the prose sections
+- If unsure whether something is code or prose, leave it unchanged
+- Original file is backed up as FILE.original.md before overwriting
+- Never compress FILE.original.md (skip it)
