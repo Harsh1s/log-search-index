@@ -172,3 +172,90 @@ export interface ShippedRelease {
 
 export const roadmap: {
   updated: string;
+  lanes: { now: RoadmapItem[]; next: RoadmapItem[]; later: RoadmapItem[] };
+  shipped: ShippedRelease[];
+} = { /* populated during implementation */ };
+```
+
+**Now (v0.3.0):**
+- Parenthesised query expressions (`(level=error OR level=warn) AND service=payments`)
+- Distroless Docker image
+- Generated columns
+
+**Next:**
+- Windows `--follow` support (NTFS rotation detection)
+- yaml/csv output formats
+- Per-source configurable retention (`prune --older-than` per source)
+
+**Later (no timeline):**
+- HTTP API authentication
+- Multi-file glob ingest
+- Aggregations: count, distinct, group-by
+- Browser-based query UI (explicit v1 non-goal, listed for completeness)
+
+**Shipped:**
+- v0.2.1 (2026-06-01): Security tests, functional tests (proptest, concurrent ingest, boundary prune, API integration), supply-chain hardening (cargo-deny, SBOM, audit CI), allocation improvements
+- v0.2.0 (2026-05-15): OR query language, logfmt/plain ingestion, --follow mode, prune subcommand, /version + CORS on API, multi-arch Docker
+- v0.1.0 (2026-04-19): Initial release — ingest, query, stats, SQLite, blake3 dedup, HTTP API
+
+---
+
+## 8. Interactive Components
+
+| Component | Island type | Behavior |
+|---|---|---|
+| `ThemeToggle` | `<script>` | Reads `localStorage['logdive-theme']`, toggles `[data-theme]` on `<html>`, persists |
+| `CodeBlock` | `<script>` | `navigator.clipboard.writeText` + `execCommand` fallback; "COPIED" feedback |
+| `Tabs` | `<script>` | `.is-active` class on button + panel pairs |
+| Mobile nav | `<script>` | `.is-open` toggle on `.nav` |
+| Docs scroll-spy | `<script>` | `IntersectionObserver` on section headings → highlight active sidebar link |
+| `RoadmapStatus` | **None** | Rendered at build time from `data/roadmap.ts`; no client JS |
+
+All scripts use Astro's native `<script>` tag (auto-bundled, deferred). No external JS libraries.
+
+---
+
+## 9. GitHub Actions Workflow
+
+**File:** `.github/workflows/landing.yml`
+
+```yaml
+name: Deploy landing page
+on:
+  push:
+    branches: [main]
+    paths: ['landing/**']
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: withastro/action@v3
+        with:
+          path: landing
+          node-version: 22
+```
+
+Pushes built `dist/` to `gh-pages` branch. Repository GitHub Pages setting: source = `gh-pages` branch, root `/`.
+
+---
+
+## 10. Accessibility + Performance Targets
+
+- Semantic HTML: `<header>`, `<nav>`, `<main>`, `<footer>`, `<article>`, `<aside>`, `aria-label` on nav regions
+- `prefers-reduced-motion`: all animations/transitions disabled
+- `NO_COLOR` pattern honoured in code examples
+- Target: Lighthouse Performance ≥ 95, Accessibility ≥ 95
+- Fonts loaded with `display=swap`; theme pre-paint inline script prevents flash
+
+---
+
+## 11. Out of Scope
+
+- Contact page (exists in handoff but not wired in nav; omit unless user requests)
+- Search functionality
+- i18n
