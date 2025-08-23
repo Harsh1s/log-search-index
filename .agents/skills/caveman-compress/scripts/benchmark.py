@@ -50,29 +50,3 @@ def main():
             print(f"❌ Not found: {orig}")
             sys.exit(1)
         if not comp.exists():
-            print(f"❌ Not found: {comp}")
-            sys.exit(1)
-        print_table([benchmark_pair(orig, comp)])
-        return
-
-    # Glob mode: repo_root/tests/caveman-compress/
-    # __file__ lives at <repo_root>/skills/caveman-compress/scripts/benchmark.py
-    # Walk up four dirs: scripts → caveman-compress → skills → repo_root.
-    tests_dir = Path(__file__).resolve().parents[3] / "tests" / "caveman-compress"
-    if not tests_dir.exists():
-        print(f"❌ Tests dir not found: {tests_dir}")
-        sys.exit(1)
-
-    rows = []
-    for orig in sorted(tests_dir.glob("*.original.md")):
-        comp = orig.with_name(orig.stem.removesuffix(".original") + ".md")
-        if comp.exists():
-            rows.append(benchmark_pair(orig, comp))
-
-    if not rows:
-        print("No compressed file pairs found.")
-        return
-
-    print_table(rows)
-
-
