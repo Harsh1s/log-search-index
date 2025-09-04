@@ -133,3 +133,4 @@ mod tests {
         let back: LogEntry = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(e, back);
     }
+}
