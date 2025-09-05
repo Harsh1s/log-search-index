@@ -94,5 +94,3 @@ by Arya:
 - **Log shipping, agents, or daemons** — logdive is a tool you invoke, not a
   service that runs continuously
 - **A browser UI** — curl and the CLI are the intended interfaces; third parties
-  can build UIs against the HTTP API
-- **A hosted version** — none planned, ever
