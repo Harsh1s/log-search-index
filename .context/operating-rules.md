@@ -100,3 +100,5 @@ rules 13+ are derived from discovered constraints and past incidents.
 
 22. **`idx_level_norm` is idempotent — it runs on every `Indexer::open()`.**
     `CREATE INDEX IF NOT EXISTS idx_level_norm ON log_entries(lower(level))` is
+    in `init_schema`. This is intentional: existing databases pick it up on the
+    next open without migration. Do not move it to a migration path.
