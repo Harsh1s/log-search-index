@@ -69,3 +69,74 @@ def extract_code_blocks(text):
                 and len(close_m.group(2)) >= fence_len
                 and close_m.group(3).strip() == ""
             ):
+                block_lines.append(lines[i])
+                closed = True
+                i += 1
+                break
+            block_lines.append(lines[i])
+            i += 1
+        if closed:
+            blocks.append("\n".join(block_lines))
+        # Unclosed fences are silently skipped — they indicate malformed markdown
+        # and including them would cause false-positive validation failures.
+    return blocks
+
+
+def extract_urls(text):
+    return set(URL_REGEX.findall(text))
+
+
+def extract_paths(text):
+    return set(PATH_REGEX.findall(text))
+
+
+def count_bullets(text):
+    return len(BULLET_REGEX.findall(text))
+
+
+def extract_inline_codes(text):
+    text_without_fences = re.sub(r"^```[\s\S]*?^```", "", text, flags=re.MULTILINE)
+    text_without_fences = re.sub(r"^~~~[\s\S]*?^~~~", "", text_without_fences, flags=re.MULTILINE)
+    return re.findall(r"`([^`]+)`", text_without_fences)
+
+
+# ---------- Validators ----------
+
+
+def validate_headings(orig, comp, result):
+    h1 = extract_headings(orig)
+    h2 = extract_headings(comp)
+
+    if len(h1) != len(h2):
+        result.add_error(f"Heading count mismatch: {len(h1)} vs {len(h2)}")
+
+    if h1 != h2:
+        result.add_warning("Heading text/order changed")
+
+
+def validate_code_blocks(orig, comp, result):
+    c1 = extract_code_blocks(orig)
+    c2 = extract_code_blocks(comp)
+
+    if c1 != c2:
+        result.add_error("Code blocks not preserved exactly")
+
+
+def validate_urls(orig, comp, result):
+    u1 = extract_urls(orig)
+    u2 = extract_urls(comp)
+
+    if u1 != u2:
+        result.add_error(f"URL mismatch: lost={u1 - u2}, added={u2 - u1}")
+
+
+def validate_paths(orig, comp, result):
+    p1 = extract_paths(orig)
+    p2 = extract_paths(comp)
+
+    if p1 != p2:
+        result.add_warning(f"Path mismatch: lost={p1 - p2}, added={p2 - p1}")
+
+
+def validate_bullets(orig, comp, result):
+    b1 = count_bullets(orig)
