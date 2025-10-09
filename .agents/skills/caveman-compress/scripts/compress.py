@@ -82,3 +82,87 @@ def call_claude(prompt: str) -> str:
             msg = client.messages.create(
                 model=os.environ.get("CAVEMAN_MODEL", "claude-sonnet-4-5"),
                 max_tokens=8192,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return strip_llm_wrapper(msg.content[0].text.strip())
+        except ImportError:
+            pass  # anthropic not installed, fall back to CLI
+    # Fallback: use claude CLI (handles desktop auth)
+    try:
+        result = subprocess.run(
+            ["claude", "--print"],
+            input=prompt,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return strip_llm_wrapper(result.stdout.strip())
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Claude call failed:\n{e.stderr}")
+
+
+def build_compress_prompt(original: str) -> str:
+    return f"""
+Compress this markdown into caveman format.
+
+STRICT RULES:
+- Do NOT modify anything inside ``` code blocks
+- Do NOT modify anything inside inline backticks
+- Preserve ALL URLs exactly
+- Preserve ALL headings exactly
+- Preserve file paths and commands
+- Return ONLY the compressed markdown body — do NOT wrap the entire output in a ```markdown fence or any other fence. Inner code blocks from the original stay as-is; do not add a new outer fence around the whole file.
+
+Only compress natural language.
+
+TEXT:
+{original}
+"""
+
+
+def build_fix_prompt(original: str, compressed: str, errors: List[str]) -> str:
+    errors_str = "\n".join(f"- {e}" for e in errors)
+    return f"""You are fixing a caveman-compressed markdown file. Specific validation errors were found.
+
+CRITICAL RULES:
+- DO NOT recompress or rephrase the file
+- ONLY fix the listed errors — leave everything else exactly as-is
+- The ORIGINAL is provided as reference only (to restore missing content)
+- Preserve caveman style in all untouched sections
+
+ERRORS TO FIX:
+{errors_str}
+
+HOW TO FIX:
+- Missing URL: find it in ORIGINAL, restore it exactly where it belongs in COMPRESSED
+- Code block mismatch: find the exact code block in ORIGINAL, restore it in COMPRESSED
+- Heading mismatch: restore the exact heading text from ORIGINAL into COMPRESSED
+- Do not touch any section not mentioned in the errors
+
+ORIGINAL (reference only):
+{original}
+
+COMPRESSED (fix this):
+{compressed}
+
+Return ONLY the fixed compressed file. No explanation.
+"""
+
+
+# ---------- Core Logic ----------
+
+
+def compress_file(filepath: Path) -> bool:
+    # Resolve and validate path
+    filepath = filepath.resolve()
+    MAX_FILE_SIZE = 500_000  # 500KB
+    if not filepath.exists():
+        raise FileNotFoundError(f"File not found: {filepath}")
+    if filepath.stat().st_size > MAX_FILE_SIZE:
+        raise ValueError(f"File too large to compress safely (max 500KB): {filepath}")
+
+    # Refuse files that look like they contain secrets or PII. Compressing ships
+    # the raw bytes to the Anthropic API — a third-party boundary — so we fail
+    # loudly rather than silently exfiltrate credentials or keys. Override is
+    # intentional: the user must rename the file if the heuristic is wrong.
+    if is_sensitive_path(filepath):

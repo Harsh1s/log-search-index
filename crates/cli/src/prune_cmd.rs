@@ -322,3 +322,165 @@ mod tests {
         let err = resolve_older_than("d", now()).unwrap_err();
         assert!(err.contains("\"d\""));
     }
+
+    #[test]
+    fn older_than_rejects_missing_unit() {
+        // "30" with no unit: the trailing '0' is not a valid unit char.
+        let err = resolve_older_than("30", now()).unwrap_err();
+        assert!(err.contains("\"30\""));
+    }
+
+    #[test]
+    fn older_than_rejects_negative_number() {
+        // '-5' does not parse as u64, so this is rejected at the number step.
+        let err = resolve_older_than("-5d", now()).unwrap_err();
+        assert!(err.contains("\"-5d\""));
+    }
+
+    #[test]
+    fn older_than_rejects_empty() {
+        let err = resolve_older_than("", now()).unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn older_than_rejects_non_numeric_amount() {
+        let err = resolve_older_than("abcd", now()).unwrap_err();
+        assert!(err.contains("\"abcd\""));
+    }
+
+    // --- resolve_before ----------------------------------------------------
+
+    #[test]
+    fn before_accepts_rfc3339() {
+        let cutoff = resolve_before("2026-04-15T10:30:00Z").unwrap();
+        assert_eq!(
+            cutoff,
+            Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn before_accepts_rfc3339_with_offset() {
+        // +02:00 offset normalizes to 08:30 UTC.
+        let cutoff = resolve_before("2026-04-15T10:30:00+02:00").unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 15, 8, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn before_accepts_naive_datetime_space_separated() {
+        let cutoff = resolve_before("2026-04-15 10:30:00").unwrap();
+        assert_eq!(
+            cutoff,
+            Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn before_accepts_naive_datetime_t_separated() {
+        let cutoff = resolve_before("2026-04-15T10:30:00").unwrap();
+        assert_eq!(
+            cutoff,
+            Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn before_accepts_bare_date_as_utc_midnight() {
+        let cutoff = resolve_before("2026-04-15").unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn before_is_trimmed() {
+        let cutoff = resolve_before("  2026-04-15  ").unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn before_rejects_garbage() {
+        let err = resolve_before("not-a-date").unwrap_err();
+        assert!(err.contains("not-a-date"));
+    }
+
+    #[test]
+    fn before_rejects_impossible_date() {
+        let err = resolve_before("2026-13-99").unwrap_err();
+        assert!(err.contains("2026-13-99"));
+    }
+
+    #[test]
+    fn before_rejects_empty() {
+        let err = resolve_before("").unwrap_err();
+        assert!(err.contains("invalid datetime"));
+    }
+
+    // --- resolve_cutoff routing -------------------------------------------
+
+    #[test]
+    fn cutoff_routes_to_older_than_when_only_that_is_set() {
+        let args = PruneArgs {
+            older_than: Some("1d".to_string()),
+            before: None,
+            yes: false,
+        };
+        // Can't pin `now` through resolve_cutoff, but we can assert the
+        // cutoff is in the past relative to a freshly-taken now.
+        let cutoff = resolve_cutoff(&args).unwrap();
+        assert!(cutoff < Utc::now());
+    }
+
+    #[test]
+    fn cutoff_routes_to_before_when_only_that_is_set() {
+        let args = PruneArgs {
+            older_than: None,
+            before: Some("2026-04-15".to_string()),
+            yes: false,
+        };
+        let cutoff = resolve_cutoff(&args).unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn cutoff_rejects_both_flags_set() {
+        // Defensive: clap's ArgGroup normally prevents this from ever
+        // reaching resolve_cutoff, but the function must not panic if it does.
+        let args = PruneArgs {
+            older_than: Some("1d".to_string()),
+            before: Some("2026-04-15".to_string()),
+            yes: false,
+        };
+        let err = resolve_cutoff(&args).unwrap_err();
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn cutoff_rejects_neither_flag_set() {
+        let args = PruneArgs {
+            older_than: None,
+            before: None,
+            yes: false,
+        };
+        let err = resolve_cutoff(&args).unwrap_err();
+        assert!(err.contains("required"));
+    }
+
+    #[test]
+    fn cutoff_propagates_resolution_errors() {
+        let args = PruneArgs {
+            older_than: Some("nonsense".to_string()),
+            before: None,
+            yes: false,
+        };
+        assert!(resolve_cutoff(&args).is_err());
+    }
+
+    // --- plural_entries ----------------------------------------------------
+
+    #[test]
+    fn plural_entries_singular_and_plural() {
+        assert_eq!(plural_entries(1), "entry");
+        assert_eq!(plural_entries(0), "entries");
+        assert_eq!(plural_entries(2), "entries");
+    }
+}
