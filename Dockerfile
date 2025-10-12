@@ -34,39 +34,3 @@ WORKDIR /build
 # ─────────────────────────────────────────────────────────────────────────────
 FROM chef AS planner
 COPY . .
-RUN cargo chef prepare --recipe-path recipe.json
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 3 — builder
-# Step A (cook): compile all workspace dependencies from recipe.json.
-#   This layer is cached by Docker/BuildKit and only invalidated when
-#   recipe.json changes (i.e. a dep is added, removed, or version-bumped).
-#   On a cache hit, step A is skipped entirely — deps are restored in < 1 s.
-# Step B (build): compile the two release binaries against the cached deps.
-#   Only this step re-runs on pure source changes.
-#
-# The /data directory is created here — distroless has no shell or mkdir,
-# so directory scaffolding must happen in a shell-capable stage. uid/gid
-# 65532 is the nonroot user pre-provisioned in the distroless:nonroot image.
-# ─────────────────────────────────────────────────────────────────────────────
-FROM chef AS builder
-COPY --from=planner /build/recipe.json recipe.json
-# Step A — cook dependencies (the key caching layer).
-RUN cargo chef cook --release --recipe-path recipe.json
-# Step B — compile both binaries. Source is copied after cooking so that
-# source-only changes don't bust the dependency cache above.
-COPY . .
-RUN cargo build --release --bin logdive --bin logdive-api
-# Pre-create /data owned by the distroless nonroot uid so the index is
-# writable when a Docker named volume is mounted at /data on first run.
-RUN mkdir -p /data && chown 65532:65532 /data
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 4 — runtime
-# gcr.io/distroless/cc-debian12:nonroot — minimal image containing only the
-# C runtime library (glibc + libgcc). Contains:
-#   - the two logdive binaries (SQLite statically linked via rusqlite bundled)
-#   - the /data directory scaffold (from builder)
-#
-# No shell, no curl, no package manager, no toolchain, no source code.
-# The nonroot tag runs the process as uid 65532 without any root interaction.
