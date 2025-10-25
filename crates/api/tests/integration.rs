@@ -211,3 +211,216 @@ async fn query_with_matching_expression_returns_ndjson() {
 }
 
 #[tokio::test]
+async fn query_with_and_expression_narrows_results() {
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                // level=error AND tag=api → one row
+                .uri("/query?q=level%3Derror+AND+tag%3Dapi")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows = parse_ndjson(&body_text(resp).await);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["message"], "payment failed");
+}
+
+#[tokio::test]
+async fn query_with_or_expression_returns_union() {
+    // OR is fully supported in v0.2.0. Both error rows and the info row
+    // should be returned.
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                // level=error OR level=info → all three fixture rows
+                .uri("/query?q=level%3Derror+OR+level%3Dinfo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows = parse_ndjson(&body_text(resp).await);
+    assert_eq!(rows.len(), 3);
+}
+
+#[tokio::test]
+async fn query_missing_q_parameter_returns_400() {
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .uri("/query")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = body_json(resp).await;
+    let msg = v["error"].as_str().unwrap_or_default();
+    assert!(msg.contains('q'), "error message should mention `q`: {msg}");
+}
+
+#[tokio::test]
+async fn query_empty_q_parameter_returns_400() {
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .uri("/query?q=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn query_malformed_expression_returns_400() {
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    // A syntactically broken query: `level =` has no value after the
+    // operator and is rejected by the parser regardless of grammar version.
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .uri("/query?q=level+%3D")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = body_json(resp).await;
+    assert!(!v["error"].as_str().unwrap_or_default().is_empty());
+}
+
+#[tokio::test]
+async fn query_with_zero_results_returns_empty_ndjson_body() {
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .uri("/query?q=level%3Dnonsense")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let text = body_text(resp).await;
+    // Empty body → zero NDJSON lines; still a successful response.
+    assert!(text.is_empty() || text == "\n");
+    assert_eq!(parse_ndjson(&text).len(), 0);
+}
+
+#[tokio::test]
+async fn query_with_limit_zero_returns_all_matches_unlimited() {
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                // Match everything via a "since" clause far enough in the past.
+                .uri("/query?q=since+2020-01-01&limit=0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows = parse_ndjson(&body_text(resp).await);
+    assert_eq!(rows.len(), 3);
+}
+
+#[tokio::test]
+async fn query_respects_explicit_limit() {
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .uri("/query?q=since+2020-01-01&limit=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rows = parse_ndjson(&body_text(resp).await);
+    assert_eq!(rows.len(), 1);
+    // Default ordering is newest-first — expect the 12:00 row.
+    assert_eq!(rows[0]["timestamp"], "2026-04-20T12:00:00Z");
+}
+
+// ---------------------------------------------------------------------------
+// Routing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn unknown_route_returns_404() {
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .uri("/no-such-endpoint")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn post_to_query_endpoint_returns_405() {
+    // GET-only: Axum rejects other methods with 405 Method Not Allowed.
+    let (_dir, db) = populated_db();
+    let router = app(db);
+
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/query?q=level%3Derror")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+// ---------------------------------------------------------------------------

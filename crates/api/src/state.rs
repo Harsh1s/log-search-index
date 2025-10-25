@@ -163,3 +163,4 @@ mod tests {
             .expect_err("panic should propagate as error, not silent success");
         assert!(matches!(err, LogdiveError::Io { .. }));
     }
+}
