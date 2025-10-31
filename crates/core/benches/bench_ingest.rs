@@ -47,3 +47,52 @@ fn generate_lines(n: usize) -> Vec<String> {
                 dur = (i * 13) % 5000
             )
         })
+        .collect()
+}
+
+/// Parse a slice of lines into LogEntry values. Used outside the
+/// measurement loop so ingestion benches measure the indexer path, not
+/// the parser (which has its own implicit coverage via integration
+/// tests). A separate parse-only benchmark would be additive later.
+fn parse_all(lines: &[String]) -> Vec<logdive_core::LogEntry> {
+    lines
+        .iter()
+        .filter_map(|l| parse_line(LogFormat::Json, l))
+        .collect()
+}
+
+/// Open a fresh on-disk `Indexer` under the given temp directory.
+///
+/// Returns the indexer and the path so callers can reuse the path for
+/// subsequent reopenings if needed (not used here, but keeps the helper
+/// general).
+fn fresh_indexer(tmp: &TempDir) -> (Indexer, PathBuf) {
+    let path = tmp.path().join("bench.db");
+    let indexer = Indexer::open(&path).expect("open bench index");
+    (indexer, path)
+}
+
+fn bench_insert_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ingest/insert_batch");
+
+    for &n in &[100usize, 1_000, 10_000] {
+        let lines = generate_lines(n);
+        let entries = parse_all(&lines);
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &entries, |b, entries| {
+            b.iter_batched(
+                || {
+                    // Per-sample setup: fresh temp dir, fresh DB, fresh indexer.
+                    // Excluded from the measurement window by iter_batched.
+                    let tmp = TempDir::new().expect("tempdir");
+                    let (indexer, _path) = fresh_indexer(&tmp);
+                    (tmp, indexer)
+                },
+                |(tmp, mut indexer)| {
+                    // Measured: the actual batched insert.
+                    let stats = indexer.insert_batch(entries).expect("insert batch");
+                    // Touch the stats so the optimizer can't eliminate them.
+                    assert_eq!(stats.inserted, entries.len());
+                    // Keep the tempdir alive until the closure ends so the
+                    // DB file isn't unlinked mid-measurement.
+                    drop(indexer);
