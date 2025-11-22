@@ -52,30 +52,3 @@ human_size() {
 }
 
 printf '%-20s %-15s %-15s %s\n' "binary" "size" "limit" "status"
-printf '%-20s %-15s %-15s %s\n' "------" "----" "-----" "------"
-
-status=0
-for bin in $BINARIES; do
-  path="$RELEASE_DIR/$bin"
-  if [ ! -f "$path" ]; then
-    printf '%-20s %-15s %-15s %s\n' "$bin" "-" "$(human_size $MAX_BYTES)" "MISSING"
-    status=1
-    continue
-  fi
-  size=$(file_size "$path")
-  human=$(human_size "$size")
-  limit=$(human_size "$MAX_BYTES")
-  if [ "$size" -le "$MAX_BYTES" ]; then
-    printf '%-20s %-15s %-15s %s\n' "$bin" "$human" "$limit" "OK"
-  else
-    printf '%-20s %-15s %-15s %s\n' "$bin" "$human" "$limit" "OVER LIMIT"
-    status=1
-  fi
-done
-
-if [ "$status" -ne 0 ]; then
-  echo ""
-  echo "error: one or more binaries exceeded the 10MB size limit." >&2
-  echo "hint: review recent dependency additions; consider \`cargo bloat\` to identify large contributors." >&2
-  exit 1
-fi

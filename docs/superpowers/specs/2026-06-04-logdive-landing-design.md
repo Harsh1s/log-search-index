@@ -259,3 +259,5 @@ Pushes built `dist/` to `gh-pages` branch. Repository GitHub Pages setting: sour
 - Contact page (exists in handoff but not wired in nav; omit unless user requests)
 - Search functionality
 - i18n
+- RSS feed
+- Analytics
