@@ -370,3 +370,189 @@ mod tests {
         assert_eq!(fields_get(&e, "debug"), Some(&json!("true")));
         assert_eq!(fields_get(&e, "verbose"), Some(&json!("true")));
         assert_eq!(fields_get(&e, "dry_run"), Some(&json!("true")));
+    }
+
+    #[test]
+    fn empty_value_after_equals_is_empty_string_not_true() {
+        // `key=` is distinct from `key` (the latter is a bareword bool).
+        let e = parse_line("key= other=v").expect("should parse");
+        assert_eq!(fields_get(&e, "key"), Some(&json!("")));
+        assert_eq!(fields_get(&e, "other"), Some(&json!("v")));
+    }
+
+    // -----------------------------------------------------------------
+    // Empty / whitespace / unparseable lines
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn empty_line_returns_none() {
+        assert!(parse_line("").is_none());
+    }
+
+    #[test]
+    fn whitespace_only_line_returns_none() {
+        assert!(parse_line("   \t  ").is_none());
+    }
+
+    #[test]
+    fn line_with_only_unparseable_junk_returns_none() {
+        // `123` doesn't start with a valid key char; `=foo` either.
+        // No bareword bools survive; line is dropped.
+        assert!(parse_line("123 =foo 456=789").is_none());
+    }
+
+    #[test]
+    fn junk_token_between_valid_pairs_is_skipped() {
+        // Lenient mode: drop the bad token, keep the surrounding pairs.
+        // `123abc` doesn't parse as a key (digit start) and is skipped.
+        let e = parse_line("level=info 123abc=foo service=api").expect("should parse");
+        assert_eq!(e.level.as_deref(), Some("info"));
+        assert_eq!(fields_get(&e, "service"), Some(&json!("api")));
+        // `123abc` is junk — neither under that name nor any other.
+        assert!(!e.fields.contains_key("123abc"));
+    }
+
+    // -----------------------------------------------------------------
+    // Duplicate keys: last write wins
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn duplicate_unknown_key_last_wins() {
+        let e = parse_line("status=pending status=failed").expect("should parse");
+        assert_eq!(fields_get(&e, "status"), Some(&json!("failed")));
+    }
+
+    #[test]
+    fn duplicate_known_key_last_wins() {
+        let e = parse_line("level=info level=error").expect("should parse");
+        assert_eq!(e.level.as_deref(), Some("error"));
+    }
+
+    // -----------------------------------------------------------------
+    // Known-key promotion
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn timestamp_is_promoted_to_struct_field() {
+        let e = parse_line("timestamp=2026-04-15T09:00:00Z level=info").expect("should parse");
+        assert_eq!(e.timestamp.as_deref(), Some("2026-04-15T09:00:00Z"));
+        assert!(!e.fields.contains_key("timestamp"));
+    }
+
+    #[test]
+    fn message_is_promoted_when_quoted() {
+        let e =
+            parse_line(r#"timestamp=2026-04-15T09:00:00Z message="hello world""#).expect("parse");
+        assert_eq!(e.message.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn tag_is_promoted_to_struct_field() {
+        let e = parse_line("tag=api level=info").expect("should parse");
+        assert_eq!(e.tag.as_deref(), Some("api"));
+        assert!(!e.fields.contains_key("tag"));
+    }
+
+    #[test]
+    fn all_four_known_keys_promoted_together() {
+        let e = parse_line(
+            r#"timestamp=2026-04-15T09:00:00Z level=error message="boom" tag=api service=payments"#,
+        )
+        .expect("should parse");
+        assert_eq!(e.timestamp.as_deref(), Some("2026-04-15T09:00:00Z"));
+        assert_eq!(e.level.as_deref(), Some("error"));
+        assert_eq!(e.message.as_deref(), Some("boom"));
+        assert_eq!(e.tag.as_deref(), Some("api"));
+        assert_eq!(e.fields.len(), 1);
+        assert_eq!(fields_get(&e, "service"), Some(&json!("payments")));
+    }
+
+    // -----------------------------------------------------------------
+    // No type coercion (logfmt has no native typing)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn numeric_looking_value_stays_as_string() {
+        // Per Decision 4: no auto-coercion. `1234` is the string "1234".
+        let e = parse_line("duration_ms=1234").expect("should parse");
+        assert_eq!(fields_get(&e, "duration_ms"), Some(&json!("1234")));
+        // Specifically NOT json!(1234) — that would imply a number.
+        assert_ne!(fields_get(&e, "duration_ms"), Some(&json!(1234)));
+    }
+
+    #[test]
+    fn boolean_looking_value_stays_as_string() {
+        let e = parse_line("ok=true failed=false").expect("should parse");
+        assert_eq!(fields_get(&e, "ok"), Some(&json!("true")));
+        assert_eq!(fields_get(&e, "failed"), Some(&json!("false")));
+    }
+
+    // -----------------------------------------------------------------
+    // Key shapes
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn hyphenated_key_is_accepted() {
+        // Heroku and some Go services use hyphenated keys (e.g. `request-id`).
+        let e = parse_line("request-id=abc-123 method=GET").expect("should parse");
+        assert_eq!(fields_get(&e, "request-id"), Some(&json!("abc-123")));
+        assert_eq!(fields_get(&e, "method"), Some(&json!("GET")));
+    }
+
+    #[test]
+    fn dotted_key_is_accepted() {
+        let e = parse_line("user.id=42").expect("should parse");
+        assert_eq!(fields_get(&e, "user.id"), Some(&json!("42")));
+    }
+
+    #[test]
+    fn underscore_leading_key_is_accepted() {
+        let e = parse_line("_internal=true level=info").expect("should parse");
+        assert_eq!(fields_get(&e, "_internal"), Some(&json!("true")));
+        assert_eq!(e.level.as_deref(), Some("info"));
+    }
+
+    // -----------------------------------------------------------------
+    // Unicode
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unicode_in_bare_value() {
+        let e = parse_line("city=北京 lang=zh").expect("should parse");
+        assert_eq!(fields_get(&e, "city"), Some(&json!("北京")));
+        assert_eq!(fields_get(&e, "lang"), Some(&json!("zh")));
+    }
+
+    #[test]
+    fn unicode_in_quoted_value() {
+        let e = parse_line(r#"message="café résumé""#).expect("should parse");
+        assert_eq!(e.message.as_deref(), Some("café résumé"));
+    }
+
+    // -----------------------------------------------------------------
+    // Fatal errors (whole line dropped)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unterminated_quoted_value_drops_line() {
+        // Per Decision 4: fatal at the line level.
+        assert!(parse_line(r#"level=info message="oops"#).is_none());
+    }
+
+    #[test]
+    fn dangling_backslash_at_end_drops_line() {
+        // The backslash starts an escape but there's nothing to escape.
+        assert!(parse_line(r#"key="value\"#).is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Raw preservation (dedup hashing depends on it)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn raw_is_preserved_verbatim() {
+        let line = "  level=info   service=payments  ";
+        let e = parse_line(line).expect("should parse");
+        assert_eq!(e.raw, line);
+    }
+}
