@@ -96,3 +96,53 @@ fn bench_insert_batch(c: &mut Criterion) {
                     // Keep the tempdir alive until the closure ends so the
                     // DB file isn't unlinked mid-measurement.
                     drop(indexer);
+                    drop(tmp);
+                },
+                // LargeInput because the setup (fresh DB + parsed entries)
+                // is non-trivial; we want criterion to prefer fewer,
+                // larger-sample iterations to amortize setup cost.
+                BatchSize::LargeInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_parse_and_insert(c: &mut Criterion) {
+    // Variant that includes JSON parsing inside the measured region.
+    // Closer to what users actually see when they pipe logs into
+    // `logdive ingest`. Reported throughput is the end-to-end line rate.
+    let mut group = c.benchmark_group("ingest/parse_and_insert");
+
+    for &n in &[1_000usize, 10_000] {
+        let lines = generate_lines(n);
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &lines, |b, lines| {
+            b.iter_batched(
+                || {
+                    let tmp = TempDir::new().expect("tempdir");
+                    let (indexer, _path) = fresh_indexer(&tmp);
+                    (tmp, indexer)
+                },
+                |(tmp, mut indexer)| {
+                    // Measured: parse + batched insert.
+                    let entries: Vec<_> = lines
+                        .iter()
+                        .filter_map(|l| parse_line(LogFormat::Json, l))
+                        .collect();
+                    let stats = indexer.insert_batch(&entries).expect("insert");
+                    assert_eq!(stats.inserted, entries.len());
+                    drop(indexer);
+                    drop(tmp);
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_insert_batch, bench_parse_and_insert);
+criterion_main!(benches);
