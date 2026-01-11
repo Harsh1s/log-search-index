@@ -140,3 +140,74 @@ mod tests {
 
     #[test]
     fn display_uses_canonical_name() {
+        assert_eq!(format!("{}", LogFormat::Json), "json");
+        assert_eq!(format!("{}", LogFormat::Logfmt), "logfmt");
+        assert_eq!(format!("{}", LogFormat::Plain), "plain");
+    }
+
+    // ----- ALL const ---------------------------------------------------
+
+    #[test]
+    fn all_contains_every_variant() {
+        assert_eq!(LogFormat::ALL.len(), 3);
+        assert!(LogFormat::ALL.contains(&LogFormat::Json));
+        assert!(LogFormat::ALL.contains(&LogFormat::Logfmt));
+        assert!(LogFormat::ALL.contains(&LogFormat::Plain));
+    }
+
+    #[test]
+    fn all_names_round_trip_through_from_name() {
+        // LogFormat: Copy, so *format is fine when iterating &[LogFormat].
+        for format in LogFormat::ALL {
+            assert_eq!(LogFormat::from_name(format.name()), Some(*format));
+        }
+    }
+
+    // ----- Dispatcher routing -------------------------------------------
+    //
+    // The dispatcher is one match over three arms — the trivial-mistake
+    // failure mode is "right format dispatched to wrong parser." Each
+    // routing test compares the dispatcher's output with the same call
+    // made directly to the format-specific submodule. If the match arms
+    // ever get swapped, these tests fail loudly.
+
+    #[test]
+    fn dispatcher_json_matches_direct_json_call() {
+        let line = r#"{"timestamp":"2026-04-15T09:00:00Z","level":"info","message":"hi"}"#;
+        let direct = json::parse_line(line);
+        let routed = parse_line(LogFormat::Json, line);
+        assert_eq!(direct, routed);
+        assert!(direct.is_some(), "fixture line should parse");
+    }
+
+    #[test]
+    fn dispatcher_logfmt_matches_direct_logfmt_call() {
+        let line = "level=info service=payments req_id=42";
+        let direct = logfmt::parse_line(line);
+        let routed = parse_line(LogFormat::Logfmt, line);
+        assert_eq!(direct, routed);
+        assert!(direct.is_some());
+    }
+
+    #[test]
+    fn dispatcher_plain_matches_direct_plain_call() {
+        let line = "starting service version 2.4.1";
+        let direct = plain::parse_line(line);
+        let routed = parse_line(LogFormat::Plain, line);
+        assert_eq!(direct, routed);
+        assert!(direct.is_some());
+    }
+
+    #[test]
+    fn dispatcher_returns_none_for_empty_line_in_every_format() {
+        // Each parser has its own None-on-empty rule — the dispatcher
+        // mustn't accidentally treat one of them differently.
+        for format in [LogFormat::Json, LogFormat::Logfmt, LogFormat::Plain] {
+            assert!(parse_line(format, "").is_none(), "format {format} on empty");
+            assert!(
+                parse_line(format, "   \t  ").is_none(),
+                "format {format} on whitespace"
+            );
+        }
+    }
+}

@@ -53,3 +53,58 @@ impl AppState {
     /// # Why `spawn_blocking`
     ///
     /// `rusqlite` calls are synchronous and can do real work (microseconds
+    /// for a point lookup, milliseconds for a large `LIKE`). Running them
+    /// directly inside an async handler would block one of Tokio's worker
+    /// threads for the duration of the query, starving other connections.
+    /// `spawn_blocking` hands the work to the dedicated blocking pool,
+    /// leaving the worker threads free for other async tasks.
+    pub async fn with_connection<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Indexer) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let path = self.db_path.clone();
+        let join_result = tokio::task::spawn_blocking(move || -> Result<T> {
+            let indexer = Indexer::open_read_only(&path)?;
+            f(&indexer)
+        })
+        .await;
+
+        match join_result {
+            Ok(inner) => inner,
+            Err(join_err) => {
+                // `JoinError` from `spawn_blocking` means the closure panicked
+                // or the runtime is shutting down. We surface both as an I/O
+                // error at the DB path so they have a path context attached,
+                // consistent with how other DB-adjacent failures are reported.
+                //
+                // `Error::other` is the idiomatic constructor for "wrap an
+                // arbitrary error message as io::Error without caring about
+                // the specific ErrorKind" — equivalent to the older
+                // `Error::new(ErrorKind::Other, _)` pattern but clearer.
+                let io_err = std::io::Error::other(format!("blocking task failed: {join_err}"));
+                Err(LogdiveError::io_at(&self.db_path, io_err))
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn with_connection_runs_closure_and_propagates_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ws.db");
+
+        // Initialize the DB via the core opener (creates schema).
+        let _ = Indexer::open(&db).expect("create db");
+
+        let state = AppState::new(db.clone());
+        let stats = state
+            .with_connection(|idx| idx.stats())
