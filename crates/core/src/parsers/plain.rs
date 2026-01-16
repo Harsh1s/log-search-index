@@ -40,3 +40,87 @@ pub fn parse_line(line: &str) -> Option<LogEntry> {
         return None;
     }
 
+    let mut entry = LogEntry::new(line);
+    entry.message = Some(line.to_string());
+    Some(entry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_line_becomes_message() {
+        let e = parse_line("starting service").expect("should parse");
+        assert_eq!(e.message.as_deref(), Some("starting service"));
+    }
+
+    #[test]
+    fn empty_line_returns_none() {
+        assert!(parse_line("").is_none());
+    }
+
+    #[test]
+    fn whitespace_only_returns_none() {
+        assert!(parse_line("   \t  ").is_none());
+    }
+
+    #[test]
+    fn unicode_content_preserved() {
+        let e = parse_line("正在启动 service - café").expect("should parse");
+        assert_eq!(e.message.as_deref(), Some("正在启动 service - café"));
+    }
+
+    #[test]
+    fn internal_whitespace_preserved() {
+        let e = parse_line("hello\tworld   foo").expect("should parse");
+        assert_eq!(e.message.as_deref(), Some("hello\tworld   foo"));
+    }
+
+    #[test]
+    fn leading_and_trailing_whitespace_preserved() {
+        // Explicit lock: we don't trim. The full original byte content is
+        // preserved both in `message` and `raw` so dedup hashing matches
+        // exactly what the user fed in.
+        let line = "  surrounded by spaces   ";
+        let e = parse_line(line).expect("should parse");
+        assert_eq!(e.message.as_deref(), Some(line));
+    }
+
+    #[test]
+    fn timestamp_stays_none_even_when_line_looks_like_one() {
+        // Lock-in: this parser does NOT try to extract timestamps from
+        // plaintext, even when they're obviously present. Use
+        // --timestamp-now at the CLI to fabricate the ingestion time, or
+        // ingest as JSON/logfmt for real timestamp handling.
+        let e = parse_line("Jan 15 09:00:00 host foo: started").expect("should parse");
+        assert!(e.timestamp.is_none());
+    }
+
+    #[test]
+    fn level_stays_none_even_when_line_starts_with_one() {
+        // Lock-in: no severity heuristics. "ERROR: ..." is just text.
+        let e = parse_line("ERROR: payment failed").expect("should parse");
+        assert!(e.level.is_none());
+    }
+
+    #[test]
+    fn tag_is_none() {
+        let e = parse_line("any content here").expect("should parse");
+        assert!(e.tag.is_none());
+    }
+
+    #[test]
+    fn fields_is_empty() {
+        let e = parse_line("any content here").expect("should parse");
+        assert!(e.fields.is_empty());
+    }
+
+    #[test]
+    fn raw_matches_the_input_line() {
+        // Dedup hashing depends on byte-exact preservation.
+        let line = "  any line with weird   spacing\t  ";
+        let e = parse_line(line).expect("should parse");
+        assert_eq!(e.raw, line);
+    }
+}
