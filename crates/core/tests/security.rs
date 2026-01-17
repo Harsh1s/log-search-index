@@ -154,3 +154,4 @@ fn long_line_10mb_ingested_gracefully() {
     e.timestamp = Some("2026-04-20T10:00:00Z".to_string());
     e.message = Some(big);
     let _ = idx.insert_batch(&[e]); // result irrelevant; no panic is the contract
+}
