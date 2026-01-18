@@ -101,3 +101,106 @@ struct ErrorBody<'a> {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            AppError::BadRequest(msg) => {
+                tracing::debug!(%msg, "400 bad request");
+                (StatusCode::BAD_REQUEST, msg)
+            }
+            AppError::NotFound(msg) => {
+                tracing::debug!(%msg, "404 not found");
+                (StatusCode::NOT_FOUND, msg)
+            }
+            AppError::Internal(err) => {
+                // Log the full underlying error for operators, but return
+                // a sanitized message to the client. Users should never
+                // see a SQLite error string or a filesystem path.
+                tracing::warn!(error = %err, "500 internal server error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
+            }
+        };
+
+        (status, Json(ErrorBody { error: &message })).into_response()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use logdive_core::parse_query;
+    use serde_json::Value;
+
+    /// Collect the response body into a UTF-8 string for assertion.
+    async fn read_body(resp: Response) -> (StatusCode, String) {
+        let status = resp.status();
+        let body = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let text = String::from_utf8(body.to_vec()).expect("utf-8 body");
+        (status, text)
+    }
+
+    fn parse_error_body(text: &str) -> String {
+        let v: Value = serde_json::from_str(text).expect("response body is JSON");
+        v.get("error")
+            .and_then(|e| e.as_str())
+            .expect("body has `error` string field")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn bad_request_renders_400_with_user_message() {
+        let err = AppError::BadRequest("missing `q` parameter".to_string());
+        let (status, text) = read_body(err.into_response()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(parse_error_body(&text), "missing `q` parameter");
+    }
+
+    #[tokio::test]
+    async fn not_found_renders_404_with_user_message() {
+        let err = AppError::NotFound("no such entry".to_string());
+        let (status, text) = read_body(err.into_response()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(parse_error_body(&text), "no such entry");
+    }
+
+    #[tokio::test]
+    async fn internal_renders_500_with_generic_message() {
+        // Construct a real Sqlite error by trying to open a non-existent
+        // read-only database — this gives us a genuine `LogdiveError::Sqlite`
+        // without having to build rusqlite internals by hand.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+        let inner =
+            logdive_core::Indexer::open_read_only(&missing).expect_err("should fail on missing db");
+
+        let err = AppError::Internal(inner);
+        let (status, text) = read_body(err.into_response()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Client sees the sanitized message, never the raw sqlite error.
+        assert_eq!(parse_error_body(&text), "internal server error");
+    }
+
+    #[tokio::test]
+    async fn from_logdive_error_maps_query_parse_to_bad_request() {
+        // Parse a clearly malformed query to get a real QueryParse error.
+        let query_err = parse_query("level =").expect_err("should not parse");
+        let app_err: AppError = LogdiveError::from(query_err).into();
+        let (status, text) = read_body(app_err.into_response()).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // 400s surface the real message to the client.
+        assert_ne!(parse_error_body(&text), "internal server error");
+        assert!(!parse_error_body(&text).is_empty());
+    }
+
