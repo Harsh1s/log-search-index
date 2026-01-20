@@ -71,3 +71,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in a known field preserved in `fields` map; whitespace in known
     field value preserved verbatim.
   - Time-range: space-separator datetime accepted; boundary row at
+    cutoff is included (`>=`); far-future timestamp returns empty; very
+    large `last` duration saturates to epoch; UTC offset `+00:00`
+    equivalent to `Z`.
+  - Follow-mode: file deleted after open returns `Ok([])`, not error;
+    burst of appended lines read completely in one call.
+  - API integration: `limit` larger than match count returns all
+    matches; `contains` operator; `since` time-range; CORS preflight
+    with wildcard origin returns `access-control-allow-origin: *`; `raw`
+    field present in every response entry.
+  - Prune boundary: 1-second precision — entry at cutoff not deleted;
+    idempotent second prune with same cutoff deletes nothing.
+
+- **H3 — Supply-chain hardening**
+  - `Cargo.lock` tracked for reproducible builds and deterministic audit
+    scans.
+  - `deny.toml`: `cargo-deny` configuration with license allowlist
+    (MIT / Apache-2.0 / Apache-2.0 WITH LLVM-exception / BSD-2-Clause /
+    BSD-3-Clause / ISC / CC0-1.0 / MIT-0 / Unicode-3.0 / Unlicense /
+    Zlib / BSL-1.0), RUSTSEC advisory checks (`vulnerability = deny`,
+    `unsound = deny`), and crates.io-only source policy.
+  - `scripts/audit.sh`: `cargo-audit` runner; exits non-zero on any
+    known vulnerability.
+  - `scripts/sbom.sh`: generates a CycloneDX JSON SBOM via
+    `cargo-cyclonedx`; intended for release artifact attachment.
+  - `.github/workflows/audit.yml`: daily advisory scan and `cargo deny
+    check` (informational; does not block merges).
+  - `.github/workflows/ci.yml`: `permissions: contents: read` added;
+    `cargo deny check` added to the lint job (merge-blocking).
+
+### Changed
+
+- `LogEntry::with_tag` signature changed from `Option<String>` to
+  `Option<&str>`, eliminating a `String` clone per ingested entry at
+  both CLI ingest call sites (`ingest_reader` and `ingest_lines`).
+- `entry_to_json_string` in `logdive-api` now serialises directly via
+  `serde_json::to_string(&entry)` instead of constructing a `json!`
+  macro value with `entry.fields.clone()`. Eliminates an O(fields)
+  heap allocation per HTTP response row.
+
+## [0.2.0] - 2026-05-15
+
+### Added
+
+- **M6 — Docker image + multi-arch**
+  - Multi-stage `Dockerfile` (cargo-chef caching, `debian:bookworm-slim`
+    runtime) publishing both `logdive` and `logdive-api` binaries in a
+    single image.
+  - Default `ENTRYPOINT ["logdive-api"]`; CLI accessible via
+    `--entrypoint logdive`.
+  - `ENV LOGDIVE_DB=/data/index.db` and `ENV LOGDIVE_API_HOST=0.0.0.0`
+    set sane container defaults without modifying binary source.
+  - `VOLUME ["/data"]` and `EXPOSE 4000` declared.
+  - `HEALTHCHECK` on `GET /version` (30 s interval, 5 s start period).
+  - Non-root system user `logdive` (UID/GID 1000).
+  - GitHub Actions workflow (`.github/workflows/docker.yml`): `linux/amd64`
+    + `linux/arm64` via `docker buildx` + QEMU; GHA cache (`type=gha`,
+      `mode=min`) for BuildKit layers; GHCR push via `GITHUB_TOKEN` (no PAT);
+      semver tags on `v*` push, branch tags on `main`/`release/v*`,
+      build-only (no cache write) on PRs.
+  - `logdive-api` auto-creates an empty index with initialized schema on
+    first run when the database file is absent, including any missing parent
+    directories. Genuinely bad paths still surface as startup failures.
+
+- **M5 — API capability endpoints + CORS**
+  - `GET /version` endpoint on `logdive-api` returning `version`,
+    `formats` (ingest formats the binary was compiled with), and
+    `capabilities` (available endpoint names) as a JSON object — designed
+    for client-side feature detection.
+  - `--cors-origins` flag on `logdive-api` (env: `LOGDIVE_API_CORS_ORIGINS`)
+    accepting a comma-separated list of allowed origins. Defaults to
+    disabled (same-origin only). Use `*` as the sole value to allow any
+    origin. Invalid values or mixing `*` with specific origins cause a
+    fast startup error.
