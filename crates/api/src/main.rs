@@ -514,4 +514,3 @@ mod tests {
         ];
         assert_eq!(cors_summary(&origins), "2 specific origin(s)");
     }
-}

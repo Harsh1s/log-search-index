@@ -418,3 +418,4 @@ criterion_group!(
     bench_case_insensitive_level,
     bench_pagination,
 );
+criterion_main!(benches);
