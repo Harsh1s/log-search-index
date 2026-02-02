@@ -25,30 +25,3 @@ if [ ! -d "$RELEASE_DIR" ]; then
 fi
 
 # BINARIES is whitespace-separated, not newline-separated, so it's
-# portable across POSIX sh variants (dash, busybox, bash).
-BINARIES="logdive logdive-api"
-
-# `stat` has incompatible flags across Linux (GNU) and macOS (BSD).
-# `wc -c < file` is POSIX and works everywhere.
-file_size() {
-  wc -c < "$1" | tr -d ' '
-}
-
-# Format a byte count as a human-readable string with one decimal.
-# Pure POSIX arithmetic — no awk/bc dependency beyond what `sh` guarantees.
-human_size() {
-  bytes=$1
-  if [ "$bytes" -ge 1000000 ]; then
-    whole=$((bytes / 1000000))
-    frac=$(( (bytes % 1000000) / 100000 ))
-    echo "${whole}.${frac} MB"
-  elif [ "$bytes" -ge 1000 ]; then
-    whole=$((bytes / 1000))
-    frac=$(( (bytes % 1000) / 100 ))
-    echo "${whole}.${frac} KB"
-  else
-    echo "${bytes} B"
-  fi
-}
-
-printf '%-20s %-15s %-15s %s\n' "binary" "size" "limit" "status"
