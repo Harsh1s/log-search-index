@@ -115,3 +115,120 @@ fn format_tags(tags: &[Option<String>]) -> String {
     for t in tags {
         match t {
             Some(s) => named.push(s.as_str()),
+            None => has_untagged = true,
+        }
+    }
+
+    let mut parts: Vec<String> = named.iter().map(|s| (*s).to_string()).collect();
+    if has_untagged {
+        parts.push("(untagged)".to_string());
+    }
+    parts.join(", ")
+}
+
+/// Render a byte count as `N.M <unit> (<bytes> bytes)`.
+///
+/// Uses base-10 units (1 KB = 1,000 bytes), which matches `ls -h` and
+/// filesystem tooling users expect at the CLI. Internally `u64` is fine
+/// — a single SQLite file can't exceed 2^64 bytes and the intermediate
+/// `f64` cast only loses precision for files above ~2^53 bytes, which
+/// is not a real-world case for a log index.
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1_000;
+    const MB: u64 = 1_000_000;
+    const GB: u64 = 1_000_000_000;
+
+    let pretty = if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} bytes")
+    };
+
+    if bytes >= KB {
+        format!("{pretty} ({} bytes)", with_thousands_separator(bytes))
+    } else {
+        // Below 1 KB, "123 bytes (123 bytes)" is redundant — drop the suffix.
+        pretty
+    }
+}
+
+/// Insert thousand separators into a non-negative integer, in English
+/// convention (`1,234,567`). Written by hand to avoid pulling a formatting
+/// crate for one function; straightforward to audit.
+fn with_thousands_separator(n: u64) -> String {
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let len = bytes.len();
+
+    // Capacity: original + one comma per group-of-three boundary.
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logdive_core::LogEntry;
+
+    // Because `Stats` is `#[non_exhaustive]` across crate boundaries, tests
+    // here cannot construct it with a struct literal. Instead they build
+    // the object under test with real entries against an in-memory index
+    // — which has the side benefit of exercising the real plumbing.
+
+    /// Build a `LogEntry` with the minimum fields required to survive
+    /// insertion (a non-None timestamp is mandatory per the indexer's
+    /// no-fabrication policy).
+    fn entry(ts: &str, level: &str, message: &str, tag: Option<&str>) -> LogEntry {
+        let tag_part = tag.map(|t| format!(r#","tag":"{t}""#)).unwrap_or_default();
+        let raw =
+            format!(r#"{{"timestamp":"{ts}","level":"{level}","message":"{message}"{tag_part}}}"#);
+        let mut e = LogEntry::new(raw);
+        e.timestamp = Some(ts.to_string());
+        e.level = Some(level.to_string());
+        e.message = Some(message.to_string());
+        e.tag = tag.map(|t| t.to_string());
+        e
+    }
+
+    fn empty_stats() -> Stats {
+        let idx = Indexer::open_in_memory().expect("open in-memory");
+        idx.stats().expect("stats on empty index")
+    }
+
+    /// Three entries: one untagged at t0, one tagged "api" at t1, one
+    /// tagged "payments" at t2. Gives us a non-empty time range and the
+    /// full tag-ordering surface (`None` + two named).
+    fn three_entry_stats() -> Stats {
+        let mut idx = Indexer::open_in_memory().expect("open in-memory");
+        idx.insert_batch(&[
+            entry("2026-03-14T08:22:01Z", "info", "oldest", None),
+            entry("2026-04-01T12:00:00Z", "warn", "middle", Some("api")),
+            entry("2026-04-22T19:45:03Z", "error", "newest", Some("payments")),
+        ])
+        .expect("insert");
+        idx.stats().expect("stats")
+    }
+
+    // --- Standalone helpers ---
+
+    #[test]
+    fn thousands_separator_small_numbers() {
+        assert_eq!(with_thousands_separator(0), "0");
+        assert_eq!(with_thousands_separator(7), "7");
+        assert_eq!(with_thousands_separator(999), "999");
+    }
+
