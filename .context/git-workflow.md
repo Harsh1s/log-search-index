@@ -97,3 +97,5 @@ Step-by-step to ship a version (taken from `scripts/prerelease-check.sh`):
   as a registry dep when packaging.
 - **Never create a tag before merging to main.** The prerelease check script
   validates you're on main before tagging.
+- **Never leave `[Unreleased]` undated.** The script checks for a dated
+  `[X.Y.Z] - YYYY-MM-DD` entry and fails if it finds TBD or a missing date.
