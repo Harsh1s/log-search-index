@@ -710,3 +710,359 @@ mod tests {
 
         idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "present"), no_ts])
             .unwrap();
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+    }
+
+    // -----------------------------------------------------------------
+    // open_read_only()
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn open_read_only_errors_when_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.db");
+        let err = Indexer::open_read_only(&missing).unwrap_err();
+        // SQLite returns "unable to open database file" for missing paths in
+        // read-only mode; surfaced through `LogdiveError::Sqlite`.
+        assert!(matches!(err, LogdiveError::Sqlite(_)));
+    }
+
+    #[test]
+    fn open_read_only_can_read_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro.db");
+
+        // Populate via the writable opener.
+        {
+            let mut idx = Indexer::open(&db).unwrap();
+            idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "visible")])
+                .unwrap();
+        }
+
+        // Re-open read-only and read back.
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let count: i64 = ro
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let stats = ro.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+    }
+
+    #[test]
+    fn open_read_only_rejects_writes_at_sqlite_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-reject.db");
+
+        // Create and close.
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+
+        // Re-open RO and attempt a write via raw SQL — SQLite should block it.
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro.connection().execute(
+            "INSERT INTO log_entries (timestamp, raw, raw_hash) VALUES ('x', 'y', 'z')",
+            [],
+        );
+        assert!(result.is_err(), "read-only connection must reject writes");
+    }
+
+    #[test]
+    fn open_read_only_rejects_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-update.db");
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro
+            .connection()
+            .execute("UPDATE log_entries SET level = 'x' WHERE 1=0", []);
+        assert!(result.is_err(), "read-only connection must reject UPDATE");
+    }
+
+    #[test]
+    fn open_read_only_rejects_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-delete.db");
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro
+            .connection()
+            .execute("DELETE FROM log_entries WHERE 1=0", []);
+        assert!(result.is_err(), "read-only connection must reject DELETE");
+    }
+
+    #[test]
+    fn open_read_only_rejects_create_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-ddl.db");
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro
+            .connection()
+            .execute_batch("CREATE TABLE sec_test (x TEXT)");
+        assert!(
+            result.is_err(),
+            "read-only connection must reject CREATE TABLE"
+        );
+    }
+
+    #[test]
+    fn open_read_only_rejects_pragma_user_version_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-pragma.db");
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro.connection().execute_batch("PRAGMA user_version = 42");
+        assert!(
+            result.is_err(),
+            "read-only connection must reject PRAGMA writes"
+        );
+    }
+
+    #[test]
+    fn open_read_only_does_not_run_schema_migrations() {
+        // If `open_read_only` tried to CREATE IF NOT EXISTS anything, it
+        // would error against a read-only connection. Opening an empty DB
+        // that's NOT been initialized demonstrates open_read_only doesn't
+        // attempt writes of any kind.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("bare.db");
+
+        // Create a totally empty SQLite file (no schema).
+        {
+            let c = Connection::open(&db).unwrap();
+            // Ensure the file exists without creating the log_entries table.
+            c.execute_batch("PRAGMA user_version = 0;").unwrap();
+        }
+
+        // open_read_only must succeed (no migration attempt).
+        let ro = Indexer::open_read_only(&db).expect("open ro on bare db");
+
+        // Table is absent, so a SELECT errors — proving we didn't create it.
+        let err = ro
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| {
+                row.get::<_, i64>(0)
+            });
+        assert!(err.is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // prune()
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn prune_deletes_entries_strictly_older_than_cutoff() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-01T00:00:00Z", "info", "old one"),
+            make_entry("2026-04-10T00:00:00Z", "info", "old two"),
+            make_entry("2026-04-20T00:00:00Z", "info", "kept"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2026-04-15T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 2);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // The surviving row is the one newer than the cutoff.
+        let surviving: String = idx
+            .connection()
+            .query_row("SELECT message FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(surviving, "kept");
+    }
+
+    #[test]
+    fn prune_keeps_entry_exactly_at_cutoff() {
+        // The comparison is strict `<`, so a row whose timestamp equals the
+        // cutoff is retained, not deleted.
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[make_entry("2026-04-15T00:00:00Z", "info", "boundary")])
+            .unwrap();
+
+        let stats = idx.prune("2026-04-15T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 0);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn prune_on_empty_database_deletes_nothing() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        let stats = idx.prune("2026-04-15T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 0);
+    }
+
+    #[test]
+    fn prune_with_cutoff_before_all_entries_deletes_nothing() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-20T00:00:00Z", "info", "a"),
+            make_entry("2026-04-21T00:00:00Z", "info", "b"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 0);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn prune_with_cutoff_after_all_entries_deletes_all() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-20T00:00:00Z", "info", "a"),
+            make_entry("2026-04-21T00:00:00Z", "info", "b"),
+            make_entry("2026-04-22T00:00:00Z", "info", "c"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2027-01-01T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 3);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn prune_returns_accurate_deleted_count() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        // Ten entries, one per day from the 1st to the 10th.
+        let entries: Vec<_> = (1..=10)
+            .map(|day| {
+                make_entry(
+                    &format!("2026-04-{day:02}T00:00:00Z"),
+                    "info",
+                    &format!("day-{day}"),
+                )
+            })
+            .collect();
+        idx.insert_batch(&entries).unwrap();
+
+        // Cutoff at the 6th deletes days 1-5 (strictly older): 5 rows.
+        let stats = idx.prune("2026-04-06T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 5);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn prune_then_stats_reflects_deletion() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-01T00:00:00Z", "info", "gone"),
+            make_entry("2026-04-20T00:00:00Z", "info", "stays"),
+        ])
+        .unwrap();
+
+        idx.prune("2026-04-10T00:00:00Z").unwrap();
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.min_timestamp.as_deref(), Some("2026-04-20T00:00:00Z"));
+        assert_eq!(stats.max_timestamp.as_deref(), Some("2026-04-20T00:00:00Z"));
+    }
+
+    #[test]
+    fn prune_works_on_disk_backed_index() {
+        // VACUUM exercises a different code path on-disk than in-memory;
+        // run the real on-disk path to confirm DELETE + VACUUM both succeed.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("prune.db");
+        let mut idx = Indexer::open(&db).unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-01T00:00:00Z", "info", "old"),
+            make_entry("2026-04-20T00:00:00Z", "info", "new"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2026-04-10T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 1);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn prune_one_second_boundary_deletes_only_strictly_older() {
+        // Two rows 1 second apart; cutoff is the older one's timestamp.
+        // Only the row strictly before the cutoff must be deleted.
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-20T10:00:00Z", "info", "at-cutoff"),
+            make_entry("2026-04-20T10:00:01Z", "info", "one-second-later"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2026-04-20T10:00:00Z").unwrap();
+        assert_eq!(
+            stats.deleted, 0,
+            "row at cutoff must be retained (strict <)"
+        );
+
+        let stats = idx.prune("2026-04-20T10:00:01Z").unwrap();
+        assert_eq!(
+            stats.deleted, 1,
+            "row strictly before the second cutoff must be deleted"
+        );
+    }
+
+    #[test]
+    fn prune_idempotent_second_prune_with_same_cutoff_deletes_nothing() {
+        // After the first prune removes all eligible rows, a second prune
+        // with the same cutoff must report 0 deleted — nothing left to remove.
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-01T00:00:00Z", "info", "old"),
+            make_entry("2026-04-20T00:00:00Z", "info", "keep"),
+        ])
+        .unwrap();
+
+        let first = idx.prune("2026-04-10T00:00:00Z").unwrap();
+        assert_eq!(first.deleted, 1);
+
+        let second = idx.prune("2026-04-10T00:00:00Z").unwrap();
+        assert_eq!(
+            second.deleted, 0,
+            "re-pruning same cutoff must delete nothing"
+        );
+    }
+}
