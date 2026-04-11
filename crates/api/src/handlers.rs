@@ -240,3 +240,125 @@ mod tests {
     #[test]
     fn entry_to_json_string_is_valid_json_with_expected_shape() {
         let e = sample_entry();
+        let s = entry_to_json_string(&e);
+        let v: Value = serde_json::from_str(&s).expect("valid json");
+        assert_eq!(v["timestamp"], "2026-04-22T14:03:21Z");
+        assert_eq!(v["level"], "error");
+        assert_eq!(v["message"], "boom");
+        assert!(v["tag"].is_null());
+        assert!(v["fields"].is_object());
+        assert!(v["raw"].is_string());
+    }
+
+    #[test]
+    fn entry_to_json_string_preserves_tag_and_fields() {
+        let mut e = sample_entry();
+        e.tag = Some("api".to_string());
+        e.fields
+            .insert("service".to_string(), Value::String("payments".to_string()));
+
+        let s = entry_to_json_string(&e);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["tag"], "api");
+        assert_eq!(v["fields"]["service"], "payments");
+    }
+
+    #[test]
+    fn stats_response_from_core_round_trips_all_fields() {
+        let mut idx = logdive_core::Indexer::open_in_memory().unwrap();
+        let mut e = sample_entry();
+        e.tag = Some("api".to_string());
+        idx.insert_batch(&[e]).unwrap();
+
+        let stats = idx.stats().unwrap();
+        let resp = StatsResponse::from_core(stats, "/tmp/idx.db".to_string(), 4096);
+
+        assert_eq!(resp.entries, 1);
+        assert_eq!(resp.db_path, "/tmp/idx.db");
+        assert_eq!(resp.db_size_bytes, 4096);
+        assert_eq!(resp.tags, vec![Some("api".to_string())]);
+
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["entries"], 1);
+        assert_eq!(v["db_path"], "/tmp/idx.db");
+        assert_eq!(v["db_size_bytes"], 4096);
+        assert_eq!(v["tags"][0], "api");
+    }
+
+    #[test]
+    fn stats_response_renders_null_for_empty_time_bounds() {
+        let idx = logdive_core::Indexer::open_in_memory().unwrap();
+        let stats = idx.stats().unwrap();
+        let resp = StatsResponse::from_core(stats, "/tmp/empty.db".to_string(), 0);
+
+        let v = serde_json::to_value(&resp).unwrap();
+        assert!(v["min_timestamp"].is_null());
+        assert!(v["max_timestamp"].is_null());
+        assert_eq!(v["tags"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn build_ndjson_response_sets_correct_content_type() {
+        let mut e = sample_entry();
+        e.tag = Some("api".to_string());
+        let resp = build_ndjson_response(&[e]);
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(content_type, "application/x-ndjson");
+    }
+
+    #[test]
+    fn build_ndjson_response_is_ok_for_empty_results() {
+        let resp = build_ndjson_response(&[]);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ----- GET /version ------------------------------------------------
+
+    #[tokio::test]
+    async fn version_handler_returns_current_package_version() {
+        let Json(resp) = version_handler().await;
+        assert_eq!(resp.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn version_handler_formats_match_logformat_all() {
+        let Json(resp) = version_handler().await;
+        let expected: Vec<&'static str> = LogFormat::ALL.iter().map(|f| f.name()).collect();
+        assert_eq!(resp.formats, expected);
+    }
+
+    #[tokio::test]
+    async fn version_handler_capabilities_are_sorted_and_complete() {
+        let Json(resp) = version_handler().await;
+        assert_eq!(resp.capabilities, vec!["query", "stats", "version"]);
+        // Guard: the list must stay sorted — future additions must maintain this.
+        let mut sorted = resp.capabilities.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            resp.capabilities, sorted,
+            "capabilities must be sorted alphabetically"
+        );
+    }
+
+    #[test]
+    fn version_response_serializes_to_expected_json_shape() {
+        let resp = VersionResponse {
+            version: "0.2.0",
+            formats: vec!["json", "logfmt", "plain"],
+            capabilities: vec!["query", "stats", "version"],
+        };
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["version"], "0.2.0");
+        assert_eq!(v["formats"], serde_json::json!(["json", "logfmt", "plain"]));
+        assert_eq!(
+            v["capabilities"],
+            serde_json::json!(["query", "stats", "version"])
+        );
+    }
+}
