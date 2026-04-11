@@ -26,3 +26,31 @@ from .detect import detect_file_type, should_compress
 
 
 def print_usage():
+    print("Usage: caveman <filepath>")
+
+
+def main():
+    if len(sys.argv) != 2:
+        print_usage()
+        sys.exit(1)
+
+    filepath = Path(sys.argv[1])
+
+    # Check file exists
+    if not filepath.exists():
+        print(f"❌ File not found: {filepath}")
+        sys.exit(1)
+
+    if not filepath.is_file():
+        print(f"❌ Not a file: {filepath}")
+        sys.exit(1)
+
+    filepath = filepath.resolve()
+
+    # Detect file type
+    file_type = detect_file_type(filepath)
+
+    print(f"Detected: {file_type}")
+
+    # Check if compressible
+    if not should_compress(filepath):
