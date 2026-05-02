@@ -54,3 +54,31 @@ def main():
 
     # Check if compressible
     if not should_compress(filepath):
+        print("Skipping: file is not natural language (code/config)")
+        sys.exit(0)
+
+    print("Starting caveman compression...\n")
+
+    try:
+        success = compress_file(filepath)
+
+        if success:
+            print("\nCompression completed successfully")
+            backup_path = filepath.with_name(filepath.stem + ".original.md")
+            print(f"Compressed: {filepath}")
+            print(f"Original:   {backup_path}")
+            sys.exit(0)
+        else:
+            print("\n❌ Compression failed after retries")
+            sys.exit(2)
+
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+        sys.exit(130)
+
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
