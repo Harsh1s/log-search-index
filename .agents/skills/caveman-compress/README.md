@@ -160,4 +160,3 @@ Caveman cut that by ~46% on average. Same instructions. Same accuracy. Less wast
 This skill is part of the [caveman](https://github.com/JuliusBrussee/caveman) toolkit — making Claude use fewer tokens without losing accuracy.
 
 - **caveman** — make Claude *speak* like caveman (cuts response tokens ~65%)
-- **caveman-compress** — make Claude *read* less (cuts context tokens ~46%)
