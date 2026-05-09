@@ -152,3 +152,157 @@ ld 'message contains "failed"'
 
 # Database-related events
 ld 'message contains "database"'
+
+# nginx scanner/probe traffic
+ld 'tag=nginx AND message contains "access" AND path contains "wp-admin"'
+
+# Payment errors mentioning specific error codes
+ld 'message contains "GATEWAY_TIMEOUT" OR message contains "CARD_DECLINED"'
+```
+
+---
+
+### Field comparisons
+
+```bash
+# Slow requests from nginx (over 1 second)
+ld 'request_time > 1.0'
+
+# Very fast responses only
+ld 'request_time < 0.010'
+
+# High-latency backend calls (over 2 seconds)
+ld 'duration_ms > 2000'
+
+# Large orders
+ld 'total > 100'
+
+# Specific HTTP status
+ld 'status=503'
+
+# Worker jobs that took over 300ms
+ld 'tag=worker AND duration_ms > 300'
+```
+
+---
+
+### Time-range queries
+
+```bash
+# Everything from 11:00 UTC onwards
+ld 'since 2026-04-15T11:00:00Z'
+
+# Errors in the morning window only
+ld 'level=error AND since 2026-04-15T09:00:00Z'
+
+# Combine with OR groups and time range
+ld '(level=error OR level=warn) AND service=payments AND since 2026-04-15T09:20:00Z'
+
+# Note: 'last Nh/Nd' is relative to now — use 'since' for fixture data with fixed timestamps
+# For live logs: ld 'level=error last 1h'
+```
+
+---
+
+### Tag-based filtering
+
+```bash
+# All nginx access log entries
+ld 'tag=nginx'
+
+# Errors from any tagged source
+ld 'level=error AND tag=payments'
+
+# Worker queue stats only
+ld 'tag=worker AND message contains "queue stats"'
+
+# Everything not from nginx
+ld 'level=error AND tag!=nginx'
+```
+
+---
+
+### Output formats — `--output` flag, new in v0.3.0
+
+`--output` was renamed from `--format` in v0.3.0.
+
+```bash
+# Pretty-printed output (default) — human readable with colours
+ld 'level=error' --output pretty
+
+# JSON output — one JSON object per line (NDJSON), pipe-friendly
+ld 'level=error' --output json
+
+# Pipe to jq — extract specific fields
+ld 'level=error' --output json | jq '{ts: .timestamp, svc: .service, msg: .message}'
+
+# Aggregate: count errors per service
+ld 'level=error' --output json | jq -r '.service' | sort | uniq -c | sort -rn
+
+# Extract all error codes from payments
+ld 'service=payments AND level=error' --output json | jq '.error_code // empty'
+
+# Flatten all fields from worker failures
+ld 'tag=worker AND level=error' --output json | jq '.'
+
+# Build a CSV of slow nginx requests
+ld 'tag=nginx AND request_time > 0.5' --output json \
+  | jq -r '[.timestamp, .path, .status, .request_time] | @csv'
+```
+
+---
+
+### Pagination — `--limit` and `--offset`, new in v0.3.0
+
+```bash
+# First 5 errors
+ld 'level=error' --limit 5
+
+# Next 5 (page 2)
+ld 'level=error' --limit 5 --offset 5
+
+# Page 3
+ld 'level=error' --limit 5 --offset 10
+
+# Unlimited results (override default limit of 1000)
+ld 'tag=worker' --limit 0
+
+# Combine pagination with JSON output for scripted consumption
+ld 'level=error' --limit 10 --offset 0 --output json
+ld 'level=error' --limit 10 --offset 10 --output json
+```
+
+---
+
+### Realistic investigation workflows
+
+**"What went wrong around 09:22?"**
+
+```bash
+ld 'since 2026-04-15T09:20:00Z' --limit 20
+```
+
+**"Show me the full payment failure chain for order ord_28472"**
+
+```bash
+ld 'order_id=ord_28472' --output json | jq '{ts: .timestamp, svc: .service, lvl: .level, msg: .message}'
+```
+
+**"Are there any errors or warnings I should care about right now?"**
+
+```bash
+ld 'level=error OR level=warn' --output pretty
+```
+
+**"Which user triggered rate limiting?"**
+
+```bash
+ld 'message contains "rate limit" OR message contains "rate_limit"' --output json | jq '.user_id // empty'
+```
+
+**"Show me all nginx responses that weren't 200"**
+
+```bash
+ld 'tag=nginx AND status!=200' --output json | jq '{ts: .timestamp, path: .path, status: .status}'
+```
+
