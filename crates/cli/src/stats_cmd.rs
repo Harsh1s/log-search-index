@@ -232,3 +232,120 @@ mod tests {
         assert_eq!(with_thousands_separator(999), "999");
     }
 
+    #[test]
+    fn thousands_separator_crosses_each_boundary() {
+        assert_eq!(with_thousands_separator(1_000), "1,000");
+        assert_eq!(with_thousands_separator(12_345), "12,345");
+        assert_eq!(with_thousands_separator(123_456), "123,456");
+        assert_eq!(with_thousands_separator(1_234_567), "1,234,567");
+        assert_eq!(with_thousands_separator(1_000_000_000), "1,000,000,000");
+    }
+
+    #[test]
+    fn format_size_under_one_kb_omits_redundant_suffix() {
+        assert_eq!(format_size(0), "0 bytes");
+        assert_eq!(format_size(512), "512 bytes");
+        assert_eq!(format_size(999), "999 bytes");
+    }
+
+    #[test]
+    fn format_size_renders_kb_mb_gb() {
+        assert_eq!(format_size(1_000), "1.0 KB (1,000 bytes)");
+        assert_eq!(format_size(8_400_000), "8.4 MB (8,400,000 bytes)");
+        assert_eq!(format_size(2_500_000_000), "2.5 GB (2,500,000,000 bytes)");
+    }
+
+    #[test]
+    fn format_tags_empty_shows_none() {
+        assert_eq!(format_tags(&[]), "(none)");
+    }
+
+    #[test]
+    fn format_tags_only_untagged_shows_that_marker() {
+        assert_eq!(format_tags(&[None]), "(untagged)");
+    }
+
+    #[test]
+    fn format_tags_only_named_shows_comma_separated() {
+        let tags = vec![Some("api".to_string()), Some("payments".to_string())];
+        assert_eq!(format_tags(&tags), "api, payments");
+    }
+
+    #[test]
+    fn format_tags_moves_untagged_to_end_of_display_list() {
+        // Indexer::stats() puts None first (SQLite NULL-first); CLI display
+        // rule is "(untagged)" at the *end*.
+        let tags = vec![
+            None,
+            Some("api".to_string()),
+            Some("payments".to_string()),
+            Some("worker".to_string()),
+        ];
+        assert_eq!(format_tags(&tags), "api, payments, worker, (untagged)");
+    }
+
+    // --- Behavior against real Stats values ---
+
+    #[test]
+    fn format_time_range_empty_when_index_has_no_entries() {
+        let stats = empty_stats();
+        assert_eq!(format_time_range(&stats), "(empty)");
+    }
+
+    #[test]
+    fn format_time_range_renders_arrow_between_min_and_max() {
+        let stats = three_entry_stats();
+        assert_eq!(
+            format_time_range(&stats),
+            "2026-03-14T08:22:01Z → 2026-04-22T19:45:03Z"
+        );
+    }
+
+    #[test]
+    fn format_stats_full_report_has_all_sections() {
+        let stats = three_entry_stats();
+        let out = format_stats(Path::new("/home/user/.logdive/index.db"), &stats, 8_400_000);
+
+        assert!(out.contains("logdive index: /home/user/.logdive/index.db"));
+        assert!(out.contains("Entries:       3"));
+        assert!(out.contains("Time range:    2026-03-14T08:22:01Z → 2026-04-22T19:45:03Z"));
+        // Non-null tags first in alphabetical order, (untagged) at end.
+        assert!(out.contains("Tags:          api, payments, (untagged)"));
+        assert!(out.contains("DB size:       8.4 MB (8,400,000 bytes)"));
+        // No trailing newline: the render function leaves that to println!.
+        assert!(!out.ends_with('\n'));
+    }
+
+    #[test]
+    fn format_stats_empty_index_is_graceful() {
+        let stats = empty_stats();
+        let out = format_stats(Path::new("/tmp/x.db"), &stats, 12_288);
+
+        assert!(out.contains("Entries:       0"));
+        assert!(out.contains("Time range:    (empty)"));
+        assert!(out.contains("Tags:          (none)"));
+        assert!(out.contains("DB size:       12.3 KB (12,288 bytes)"));
+    }
+
+    /// Guard against drift between the `Stats` contract advertised by
+    /// `Indexer::stats()` (NULL tag at index 0) and the display contract
+    /// implemented by `format_tags` (untagged at end). If either side
+    /// ever flips their ordering, this test fails loudly.
+    #[test]
+    fn stats_untagged_first_renders_untagged_last() {
+        let stats = three_entry_stats();
+        // Core guarantees: NULL first, then named in ascending order.
+        assert_eq!(stats.tags[0], None);
+        assert_eq!(stats.tags[1], Some("api".to_string()));
+        assert_eq!(stats.tags[2], Some("payments".to_string()));
+        // Display guarantees: named first, "(untagged)" last.
+        assert_eq!(format_tags(&stats.tags), "api, payments, (untagged)");
+    }
+
+    #[test]
+    fn stats_counts_entries_and_entries_show_in_report() {
+        let stats = three_entry_stats();
+        assert_eq!(stats.entries, 3);
+        let out = format_stats(Path::new("/tmp/x.db"), &stats, 0);
+        assert!(out.contains("Entries:       3"));
+    }

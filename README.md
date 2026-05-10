@@ -235,3 +235,477 @@ logdive index: /home/user/.logdive/index.db
   DB size:       8.4 MB (8,400,000 bytes)
 ```
 
+Errors out (exit code 1) if the configured index file does not exist. This catches typos in `--db` paths early.
+
+### `logdive prune`
+
+Deletes entries from the index that fall outside a retention window, then vacuums the database file to reclaim disk space.
+
+```bash
+# Delete everything older than 30 days.
+logdive prune --older-than 30d
+
+# Delete everything before a specific date.
+logdive prune --before 2026-01-01
+
+# Skip the interactive confirmation prompt.
+logdive prune --older-than 7d --yes
+```
+
+Flags:
+
+- `--older-than <DURATION>` — Delete entries older than this duration. Format: a positive integer followed by `m` (minutes), `h` (hours), or `d` (days). Examples: `30d`, `24h`, `90m`. Mutually exclusive with `--before`.
+- `--before <DATETIME>` — Delete entries with a timestamp before this datetime. Accepts the same three formats as the `since` query operator (RFC 3339, ISO naive datetime, ISO date). Mutually exclusive with `--older-than`.
+- `--yes` — Skip the interactive `[y/N]` confirmation. Useful in scripts and cron jobs.
+- `--db <PATH>` — Database path override. Also settable via `$LOGDIVE_DB`.
+
+By default `prune` shows the number of rows that would be deleted and asks for confirmation before proceeding. If the count is zero it exits immediately with "Nothing to prune."
+
+---
+
+## Running with Docker
+
+Official images for `linux/amd64` and `linux/arm64` are published to GHCR on every merge to `main` and on every version tag.
+
+```bash
+docker pull ghcr.io/aryagorjipour/logdive:latest
+# or pin to a specific version:
+docker pull ghcr.io/aryagorjipour/logdive:0.3.0
+```
+
+### Start the API server
+
+```bash
+# Create a named volume for the index.
+docker volume create logdive-data
+
+# Start the server. The index is auto-created on first run.
+docker run -d \
+  --name logdive \
+  -v logdive-data:/data \
+  -p 4000:4000 \
+  ghcr.io/aryagorjipour/logdive
+
+curl 'http://localhost:4000/stats'
+curl 'http://localhost:4000/version'
+```
+
+### Ingest logs with the CLI
+
+The default entrypoint is `logdive-api`. Override it with `--entrypoint logdive` to run the CLI against the same volume:
+
+```bash
+docker run --rm \
+  -v logdive-data:/data \
+  -v /path/to/your/logs:/logs:ro \
+  --entrypoint logdive \
+  ghcr.io/aryagorjipour/logdive \
+  ingest --file /logs/app.log --tag production
+```
+
+### Environment variables
+
+The image pre-sets two variables for container-native behavior:
+
+- `LOGDIVE_DB=/data/index.db` — points both binaries at the persistent volume.
+- `LOGDIVE_API_HOST=0.0.0.0` — binds the API to all container interfaces so `-p 4000:4000` works.
+
+Override any variable with `-e`:
+
+```bash
+docker run -d \
+  -v logdive-data:/data \
+  -p 4000:4000 \
+  -e LOGDIVE_API_CORS_ORIGINS='https://app.example.com' \
+  -e LOGDIVE_API_PORT=8080 \
+  -p 8080:8080 \
+  ghcr.io/aryagorjipour/logdive
+```
+
+### Health check
+
+The image declares a Docker HEALTHCHECK using the `--health-check` flag on `logdive-api`. This opens a TCP connection to the server's own port via stdlib `TcpStream` — no curl, no shell, no HTTP client required. Works correctly in the distroless runtime image.
+
+```bash
+docker inspect --format='{{.State.Health.Status}}' logdive
+```
+
+---
+
+## The `logdive-api` HTTP server
+
+A read-only HTTP server for remote querying. Useful when you want a browser-based UI, a CI check, or a shell one-liner hitting a centrally hosted index.
+
+```bash
+logdive-api --db ~/logdive.db --port 4000
+```
+
+Flags (with environment-variable fallbacks):
+
+- `--db <PATH>` / `$LOGDIVE_DB` — Database to serve. Defaults to `~/.logdive/index.db`.
+- `--port <N>` / `$LOGDIVE_API_PORT` — Port to listen on. Default 4000.
+- `--host <HOST>` / `$LOGDIVE_API_HOST` — Host to bind. Default `127.0.0.1` (loopback only). Set to `0.0.0.0` to expose beyond localhost.
+- `--cors-origins <ORIGINS>` / `$LOGDIVE_API_CORS_ORIGINS` — Comma-separated list of allowed CORS origins. Use `*` to allow any origin. Omit to disable CORS (same-origin only). Invalid values cause a startup error.
+
+```bash
+# Allow a specific frontend origin.
+logdive-api --cors-origins 'https://app.example.com'
+
+# Allow any origin (useful for local development).
+logdive-api --cors-origins '*'
+```
+
+### Endpoints
+
+#### `GET /query`
+
+Runs a query and returns matching entries as newline-delimited JSON.
+
+Query parameters:
+
+- `q` (required) — Query expression. URL-encoded.
+- `limit` (optional) — Maximum results. Default 1000. `0` means unlimited.
+- `offset` (optional) — Skip the first N results. Default 0. Use with `limit` for pagination.
+
+Response:
+
+- Status 200: `Content-Type: application/x-ndjson`, one JSON object per line.
+- Status 400: `{"error": "..."}` on missing/empty `q` or a malformed query expression.
+- Status 500: `{"error": "internal server error"}` on storage failures (logged server-side).
+
+```bash
+curl 'http://127.0.0.1:4000/query?q=level%3Derror&limit=50'
+curl 'http://127.0.0.1:4000/query?q=level%3Derror+OR+level%3Dwarn' | jq -s .
+curl 'http://127.0.0.1:4000/query?q=level%3Derror&limit=20&offset=40'
+```
+
+#### `GET /stats`
+
+Returns aggregate metadata as a single JSON object.
+
+```bash
+curl 'http://127.0.0.1:4000/stats' | jq
+```
+
+Response shape:
+
+```json
+{
+  "entries": 42317,
+  "min_timestamp": "2026-03-14T08:22:01Z",
+  "max_timestamp": "2026-04-22T19:45:03Z",
+  "tags": [null, "api", "nginx", "payments", "worker"],
+  "db_size_bytes": 8400000,
+  "db_path": "/home/user/.logdive/index.db"
+}
+```
+
+`null` in the `tags` array represents untagged rows. `min_timestamp` and `max_timestamp` are `null` on an empty index.
+
+#### `GET /version`
+
+Returns the server's version and supported capabilities as a JSON object. Designed for client-side feature detection — call this first to discover which formats and endpoints the running server supports.
+
+```bash
+curl 'http://127.0.0.1:4000/version' | jq
+```
+
+Response shape:
+
+```json
+{
+  "version": "0.3.0",
+  "formats": ["json", "logfmt", "plain"],
+  "capabilities": ["query", "stats", "version"]
+}
+```
+
+Always returns 200 OK. Never touches the database.
+
+### Security
+
+- **Read-only**: The API opens the database with `SQLITE_OPEN_READ_ONLY`. Writes are rejected at the SQLite level.
+- **No authentication**: The server assumes the network layer handles access control. Do not expose it publicly without a reverse proxy providing authentication.
+- **Auto-creates empty index on first run**: If the configured database does not exist, the server creates it with an initialized schema and starts cleanly, returning zero results until logs are ingested via the CLI. Genuinely bad paths (wrong directory, permission denied) still cause a startup failure with a clear error message.
+- **CORS disabled by default**: Cross-origin requests are blocked unless `--cors-origins` is explicitly configured.
+- **Graceful shutdown**: Ctrl-C and SIGTERM (Unix) trigger a clean shutdown.
+
+---
+
+## Query language reference
+
+logdive queries are a small expression language supporting `AND` within groups and `OR` between groups.
+
+### Grammar
+
+```
+query    := or_expr [ TIME_RANGE ]
+or_expr  := and_expr (OR and_expr)*
+and_expr := clause (AND clause)*
+clause   := field OP value
+           | field CONTAINS string
+           | "(" or_expr ")"
+           | TIME_RANGE
+field    := [a-zA-Z_][a-zA-Z0-9_.]*
+OP       := "=" | "!=" | ">" | "<"
+value    := string | number | bool
+string   := '"' .* '"' | bare_word
+TIME_RANGE := "last" duration | "since" datetime
+duration := number ("m" | "h" | "d")
+```
+
+Keywords (`AND`, `OR`, `CONTAINS`, `last`, `since`, `true`, `false`) are case-insensitive.
+
+### Fields
+
+Two kinds of fields are supported:
+
+- **Known fields** — `timestamp`, `level`, `message`, `tag`. These are indexed columns on the SQLite table. Queries on them are very fast.
+- **Unknown fields** — anything else. These are read from the JSON `fields` blob via SQLite's `json_extract()`. Slower than known-field queries but works across arbitrary JSON shapes.
+
+Field names must match `[a-zA-Z_][a-zA-Z0-9_.]*`. Nested access uses dot notation (e.g. `user.id`).
+
+### Operators
+
+| Operator | Meaning | Example |
+|---|---|---|
+| `=` | Equals | `level=error` |
+| `!=` | Not equals | `level!=debug` |
+| `>` | Greater than | `duration_ms > 1000` |
+| `<` | Less than | `status < 500` |
+| `CONTAINS` | Substring match (case-insensitive) | `message contains "timeout"` |
+| `last` | Time window ending now | `last 2h` |
+| `since` | Time window starting at a given datetime | `since 2026-01-01` |
+
+Comparisons work on strings, integers, floats, and booleans. `true`/`false` are stored as `1`/`0`.
+
+### Time ranges
+
+`last` takes a number followed by a unit:
+
+- `m` — minutes (`last 30m`)
+- `h` — hours (`last 2h`)
+- `d` — days (`last 7d`)
+
+`since` accepts three formats:
+
+- RFC 3339 / ISO 8601 with timezone: `since 2024-01-01T10:00:00Z`
+- ISO naive datetime (interpreted as UTC): `since "2024-01-01 10:00:00"` or `since 2024-01-01T10:00:00`
+- ISO date (interpreted as UTC midnight): `since 2024-01-01`
+
+Timestamps in the index are compared as text. This is correct for ISO-8601-shaped timestamps because they sort lexicographically in chronological order.
+
+### Combining clauses
+
+Clauses are joined with `AND` (case-insensitive). Groups of AND-clauses can be separated with `OR`. `AND` binds more tightly than `OR`. Parentheses are supported for explicit grouping.
+
+```bash
+# AND only.
+logdive query 'level=error AND service=payments'
+
+# OR between two simple clauses.
+logdive query 'level=error OR level=warn'
+
+# AND within each OR branch.
+logdive query 'level=error AND service=payments OR level=warn AND tag=worker'
+# Equivalent to: (level=error AND service=payments) OR (level=warn AND tag=worker)
+
+# Parentheses change precedence explicitly.
+logdive query '(level=error OR level=warn) AND service=payments'
+```
+
+### Quoting
+
+Bare words work for simple values. Use double quotes for anything containing spaces, punctuation, or a value that starts with a digit and contains letters.
+
+```
+level=error                       # bare word
+message contains "bad request"    # quotes needed for space
+version="3beta"                   # quotes needed for digit-letter mix
+since "2024-01-01 10:00:00"       # quotes needed for space
+```
+
+### Examples
+
+```bash
+# All errors.
+logdive query 'level=error'
+
+# Errors or warnings.
+logdive query 'level=error OR level=warn'
+
+# Errors from the payments service in the last 2 hours.
+logdive query 'level=error AND service=payments last 2h'
+
+# Anything mentioning "timeout" in the last day.
+logdive query 'message contains "timeout" last 24h'
+
+# Slow requests over 500ms.
+logdive query 'duration_ms > 500'
+
+# Everything from a specific user ID.
+logdive query 'user_id=4812'
+
+# Everything from a specific time range.
+logdive query 'since 2026-04-15T09:00:00Z'
+
+# Everything that isn't a health check.
+logdive query 'message!="health check ok"'
+
+# Errors from payments OR any warn from worker, last hour.
+logdive query 'level=error AND service=payments last 1h OR level=warn AND tag=worker last 1h'
+
+# Parenthesised OR, then AND narrows further.
+logdive query '(level=error OR level=warn) AND service=payments last 2h'
+```
+
+---
+
+## Configuration reference
+
+All configuration is via command-line flags, with environment-variable fallbacks for convenience in containerized deployments.
+
+### Environment variables
+
+| Variable | Applies to | Purpose |
+|---|---|---|
+| `LOGDIVE_LOG` | both binaries | Verbosity filter for internal diagnostics (passed to `tracing_subscriber::EnvFilter`). Default `warn`. Try `info` or `debug` for troubleshooting. |
+| `LOGDIVE_DB` | both binaries | Database path fallback for `--db`. CLI flag takes precedence when both are set. Default `~/.logdive/index.db`. |
+| `LOGDIVE_API_PORT` | `logdive-api` | Port fallback for `--port`. Default `4000`. |
+| `LOGDIVE_API_HOST` | `logdive-api` | Bind host fallback for `--host`. Default `127.0.0.1`. |
+| `LOGDIVE_API_CORS_ORIGINS` | `logdive-api` | Allowed CORS origins fallback for `--cors-origins`. Comma-separated list or `*`. Default: empty (CORS disabled). |
+| `NO_COLOR` | `logdive query` | Standard `NO_COLOR` convention — suppresses ANSI color output when set. |
+| `HOME` | both binaries | Used to resolve the default `~/.logdive/index.db` path on POSIX. |
+
+### Default paths
+
+- **Index database**: `~/.logdive/index.db`. Override with `--db` or `$LOGDIVE_DB`.
+- **Parent directory**: Auto-created on first `logdive ingest` (CLI) or on first `logdive-api` startup when the database path does not yet exist.
+
+---
+
+## Architecture
+
+logdive is a three-crate Rust workspace:
+
+- **`logdive-core`** — Pure library. Owns the log entry type, the multi-format parser (JSON, logfmt, plain), the SQLite-backed indexer, the query AST + parser (AND + OR), and the query executor. No I/O at the module level. Publishable to crates.io as a reusable library.
+- **`logdive`** — The CLI binary. Thin wrapper around `logdive-core` that adds `clap` parsing, follow-mode file tailing, progress output, and rendering.
+- **`logdive-api`** — The HTTP server binary. Axum router over `logdive-core`, opened in read-only mode.
+
+Key architectural choices (see the project's design document for full rationale):
+
+- **SQLite via `rusqlite`** with the `bundled` feature — zero infrastructure, ships inside the binary, battle-tested.
+- **Hybrid storage** — known fields (`timestamp`, `level`, `message`, `tag`) are real indexed columns; everything else is stored in a JSON blob and queried via `json_extract()`.
+- **Hand-written recursive descent query parser** — ~300 lines of pure Rust enums, no parser combinator library, supports AND + OR with correct precedence.
+- **Blake3 row hashing** for deduplication — `INSERT OR IGNORE` on a unique hash column means re-ingesting a file is free.
+- **Batched inserts** at 1000 rows per transaction.
+- **Separate binaries** — users who only want the CLI don't pay the Axum + Tokio compile cost.
+
+---
+
+## Performance
+
+Benchmarks live in `crates/core/benches/` and run via:
+
+```bash
+cargo bench
+```
+
+Representative numbers on a modern laptop (Acer Nitro 5, Linux):
+
+| Operation | Throughput / Latency |
+|---|---|
+| Ingestion, batched insert (10k rows) | ~189k lines/sec |
+| Ingestion, parse + insert end-to-end (10k rows) | ~150k lines/sec |
+| Query on known field, empty result (100k rows) | ~23 μs |
+| Query on known field, 25% match (100k rows, LIMIT 1000) | ~49 ms |
+| Query on JSON field, 25% match (100k rows, LIMIT 1000) | ~4.1 ms |
+| Query on JSON field, 0% match — full scan (100k rows) | ~69 ms |
+| `CONTAINS` full-table scan (100k rows) | ~35–38 ms |
+| 3-clause `AND` chain (100k rows) | ~22 ms |
+| `OR` query, 2-branch 50% match (100k rows, LIMIT 1000) | ~68 ms |
+| Parenthesised group `(A OR B) AND C`, 12.5% match (100k rows) | ~45 ms |
+| Case-insensitive level query — uppercase, lowercase, mixed | ~51 ms (identical) |
+| Pagination deep page overhead (offset 2450 vs offset 0) | +8 ms |
+
+Numbers from criterion benchmarks — run `cargo bench` for your own baseline.
+
+Release-profile binary sizes:
+
+- `logdive`: 3.9 MB
+- `logdive-api`: 4.2 MB
+
+Targets: both binaries under 10 MB. Run `scripts/check-binary-size.sh` to verify.
+
+---
+
+## Development
+
+```bash
+# Clone and build.
+git clone https://github.com/Aryagorjipour/logdive
+cd logdive
+cargo build --workspace
+
+# Run tests.
+cargo test --workspace
+
+# Lints and formatting (run before every commit).
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+
+# Run the CLI during development.
+cargo run --bin logdive -- --help
+cargo run --bin logdive -- ingest --file examples/app.log
+cargo run --bin logdive -- ingest --file examples/app.log --format logfmt
+cargo run --bin logdive -- query 'level=error OR level=warn'
+cargo run --bin logdive -- prune --older-than 7d
+
+# Run the API.
+cargo run --bin logdive-api -- --db /tmp/demo.db
+
+# Build the Docker image locally.
+docker build --platform linux/amd64 -t logdive:local .
+```
+
+MSRV: Rust 1.85. Edition 2024.
+
+### Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md) for release notes.
+
+### Contributing
+
+Bug reports and pull requests welcome. Before submitting a PR, please ensure:
+
+1. `cargo test --workspace` passes.
+2. `cargo clippy --workspace --all-targets -- -D warnings` is clean.
+3. `cargo fmt --all --check` is clean.
+4. Any new feature lands behind a discussion in an issue first, to avoid scope creep against the [v1 non-goals](#v1-non-goals).
+
+---
+
+## v1 non-goals
+
+The following are **intentionally** out of scope and may or may not land in future versions:
+
+- **Authentication on the HTTP API** — the API trusts its network layer.
+- **Ingestion over HTTP** — the API is read-only. Ingestion goes through the CLI.
+- **Multi-machine or networked indexes** — single-host only. Use Loki if you have a fleet.
+- **Real-time analytics or aggregation at scale** — logdive is a query tool, not a streaming analytics engine. Use Loki or ClickHouse for millions of rows with group-by and aggregations.
+- **Log shipping, agents, or daemons** — logdive is a tool, not a service.
+- **A browser UI** — curl and the CLI are the intended interfaces. Third parties can build UIs against the HTTP API.
+
+---
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
