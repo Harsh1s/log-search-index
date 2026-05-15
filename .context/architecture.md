@@ -73,3 +73,78 @@ crates/
 **Hand-written recursive descent query parser**
 - What: ~400 lines in `query.rs`; no parser-combinator library
 - Why: the grammar is small and stable; a combinator library adds a compile-time
+  dependency that outlives its usefulness; hand-written makes error messages and
+  the grammar itself fully controllable
+- What breaks if changed: nothing isolated, but any rewrite risks regressions in
+  the 60+ parser tests
+
+**blake3 row hashing → INSERT OR IGNORE on raw_hash UNIQUE**
+- What: `raw_hash TEXT NOT NULL UNIQUE`; every insert tries INSERT OR IGNORE;
+  duplicates are counted and silently dropped
+- Why: re-ingesting a file (rotation recovery, repeated --follow startup)
+  produces zero duplicates; no separate dedup pass needed
+- What breaks if changed: dedup guarantee; 417 tests assert on InsertStats
+
+**1000 rows per insert transaction (BATCH_SIZE)**
+- What: `ingest_reader` batches parsed entries in chunks of 1000 before each
+  `INSERT` transaction
+- Why: SQLite transaction overhead is per-transaction not per-row; 1000 is
+  empirically near the knee of the latency/throughput curve
+- What breaks if changed: throughput numbers in README; InsertStats counting
+
+**CLI fully synchronous, no tokio**
+- What: `crates/cli/src/main.rs` has no `#[tokio::main]`; follow loop uses
+  `notify` + `std::sync::mpsc` + `ctrlc`
+- Why: ingest is I/O-bound sequential work; async adds complexity with no
+  benefit; keeps compile time and binary size down
+- What breaks if changed: binary size, compile time; must not add tokio
+
+**API opens DB SQLITE_OPEN_READ_ONLY, fresh connection per request**
+- What: `AppState::with_connection` calls `Indexer::open_read_only` on every
+  request inside `spawn_blocking`
+- Why: read-only is defense-in-depth; fresh connection avoids shared mutable
+  state across requests without a mutex; `spawn_blocking` prevents blocking
+  the async executor
+- What breaks if changed: the read-only guarantee; concurrent request safety
+
+**--follow is Unix-only**
+- What: `crates/core/src/follow.rs` is gated `#[cfg(unix)]`; uses
+  `std::os::unix::fs::MetadataExt` for `(dev, ino)` rotation detection
+- Why: Windows rotation detection requires `ReadDirectoryChangesW`, deferred to v0.4+
+- What breaks if changed: cross-platform compilation
+
+**Query language v0.3 — AND + OR + parenthesised groups**
+- What: grammar supports `or_expr := and_expr (OR and_expr)*`; clauses can now
+  be `Clause::Group(Box<QueryNode>)` — a parenthesised sub-expression; executor
+  wraps groups in a nested SQL sub-expression
+- Why: shipped in v0.3.0; hand-written recursive descent parser extended with
+  `parse_primary()` that recognises `(` and recurses into `parse_or_expr()`
+- What breaks if changed: all 60+ query tests; public `QueryNode`/`Clause` enum shapes
+
+**QueryOptions replaces bare limit**
+- What: `execute(query, conn, opts: QueryOptions)` and `execute_at(query, conn, opts, now)`
+  take `QueryOptions { limit: Option<usize>, offset: Option<usize> }` since v0.3.0
+- Why: pagination requires both limit and offset; bundling in a struct avoids
+  arity growth as options expand
+- What breaks if changed: every call site in CLI, API, and all tests
+
+## Schema
+
+Exact DDL from `crates/core/src/indexer.rs`:
+
+```sql
+CREATE TABLE IF NOT EXISTS log_entries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp   TEXT NOT NULL,
+    level       TEXT,
+    message     TEXT,
+    tag         TEXT,
+    fields      TEXT,
+    raw         TEXT NOT NULL,
+    raw_hash    TEXT NOT NULL UNIQUE,
+    ingested_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_level      ON log_entries(level);
+CREATE INDEX IF NOT EXISTS idx_level_norm ON log_entries(lower(level));
+CREATE INDEX IF NOT EXISTS idx_tag        ON log_entries(tag);
+CREATE INDEX IF NOT EXISTS idx_timestamp  ON log_entries(timestamp);
