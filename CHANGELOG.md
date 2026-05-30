@@ -217,3 +217,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns for known fields and a JSON blob for unknown fields queryable via
   `json_extract()`.
 - `blake3` row hashing for deduplication via `INSERT OR IGNORE`.
+- Dual MIT OR Apache-2.0 license.
