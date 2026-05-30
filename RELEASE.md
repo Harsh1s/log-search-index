@@ -34,3 +34,75 @@ You'll need:
 
 ### 2. Run pre-release checks
 
+```bash
+sh scripts/prerelease-check.sh
+```
+
+This runs the full battery: clean working tree, build, tests, clippy, fmt, binary size check, and `cargo publish --dry-run` for each of the three crates. **Do not proceed if anything fails.**
+
+A note on the dry-run step: the script detects whether your Cargo supports `cargo publish --workspace` (stabilized in Cargo 1.90, September 2025). If so, it runs a single workspace-scoped dry-run that verifies all three crates together using an internal local-registry overlay — this is the full verification. If you're on an older Cargo, the script only verifies `logdive-core` (the library); `logdive` and `logdive-api` can't be fully dry-run-verified before `logdive-core` is published, but they'll be validated at real publish time (step 4 below).
+
+### 3. Tag and push
+
+```bash
+VERSION=X.Y.Z
+git tag -a v$VERSION -m "v$VERSION"
+git push origin main v$VERSION
+```
+
+The tag push triggers `.github/workflows/release.yml`, which builds release binaries for Linux x86_64 and macOS arm64, packages them as tarballs, and uploads them to a new GitHub Release.
+
+Watch the workflow run in the [Actions tab](https://github.com/Aryagorjipour/logdive/actions). Typical runtime: ~10 minutes.
+
+### 4. Publish to crates.io
+
+Publish in dependency order. Wait ~30 seconds between each step — the crates.io index needs time to propagate before the next crate can reference the newly published one.
+
+```bash
+cargo publish -p logdive-core
+# wait ~30s
+cargo publish -p logdive
+# wait ~30s
+cargo publish -p logdive-api
+```
+
+Verify each crate appears on its crates.io page before moving on:
+
+- <https://crates.io/crates/logdive-core>
+- <https://crates.io/crates/logdive>
+- <https://crates.io/crates/logdive-api>
+
+### 5. Post-release verification
+
+- [ ] GitHub Release at `v$VERSION` has both platform tarballs uploaded.
+- [ ] Release notes on the GitHub Release link to the CHANGELOG.
+- [ ] All three crates visible on crates.io.
+- [ ] `cargo install logdive logdive-api` from a clean machine succeeds.
+- [ ] The installed binaries run without error (`logdive --version`, `logdive-api --version`).
+
+## If something goes wrong
+
+### Tagged a broken commit
+
+```bash
+git tag -d v$VERSION
+git push --delete origin v$VERSION
+```
+
+Delete the GitHub Release manually via the web UI (tags and releases are separate objects). Fix the issue, commit, then re-tag.
+
+### Published a broken crate to crates.io
+
+You cannot delete a published version. You can yank it so no new projects pick it up, while existing `Cargo.lock` pins remain functional:
+
+```bash
+cargo yank --version X.Y.Z -p <crate-name>
+```
+
+Then publish a fixed version with an incremented patch number. See the [crates.io yank docs](https://doc.rust-lang.org/cargo/commands/cargo-yank.html).
+
+### The release workflow fails mid-run
+
+The workflow is idempotent per-artifact: re-running the failed job will re-upload the same tarball over the existing one. Use the "Re-run failed jobs" button in the Actions tab.
+
+If the matrix job itself has a bug (not a transient issue), fix it on main, then delete and re-push the tag to re-trigger the workflow.
