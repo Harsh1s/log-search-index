@@ -306,3 +306,157 @@ ld 'message contains "rate limit" OR message contains "rate_limit"' --output jso
 ld 'tag=nginx AND status!=200' --output json | jq '{ts: .timestamp, path: .path, status: .status}'
 ```
 
+**"Did any worker jobs fail permanently?"**
+
+```bash
+ld 'tag=worker AND message contains "permanently"'
+```
+
+**"Find the worker reconnect after the payment worker panic"**
+
+```bash
+ld '(message contains "reconnect" OR message contains "restarted") AND since 2026-04-15T11:27:00Z'
+```
+
+---
+
+## HTTP API
+
+Start the API server against the example database:
+
+```bash
+logdive-api --db /tmp/logdive-examples.db --port 4000 &
+```
+
+### Basic queries
+
+```bash
+# Stats
+curl -s 'http://127.0.0.1:4000/stats' | jq
+
+# Version
+curl -s 'http://127.0.0.1:4000/version' | jq
+
+# All errors
+curl -s 'http://127.0.0.1:4000/query?q=level%3Derror' | jq -s .
+
+# Errors from payments (URL-encode spaces and =)
+curl -s 'http://127.0.0.1:4000/query?q=service%3Dpayments%20AND%20level%3Derror' | jq -s .
+```
+
+### Pagination — `?offset=`, new in v0.3.0
+
+```bash
+# Page 1: first 5 errors
+curl -s 'http://127.0.0.1:4000/query?q=level%3Derror&limit=5&offset=0' | jq -s .
+
+# Page 2: next 5
+curl -s 'http://127.0.0.1:4000/query?q=level%3Derror&limit=5&offset=5' | jq -s .
+```
+
+### OR and paren queries over HTTP
+
+```bash
+# Errors or warnings (URL-encode OR)
+curl -s 'http://127.0.0.1:4000/query?q=level%3Derror%20OR%20level%3Dwarn' | jq -s .
+
+# Parenthesised group
+curl -s 'http://127.0.0.1:4000/query?q=%28level%3Derror%20OR%20level%3Dwarn%29%20AND%20service%3Dpayments' | jq -s .
+```
+
+### Stop the server
+
+```bash
+kill %1
+```
+
+---
+
+## Stats and prune
+
+```bash
+# Full index statistics
+logdive --db /tmp/logdive-examples.db stats
+
+# Dry-run prune: see what would be deleted before cutoff
+# (nothing to delete in the example DB — all entries are from 2026-04-15)
+logdive --db /tmp/logdive-examples.db prune --before 2026-04-14T00:00:00Z
+
+# Prune entries older than 30 days from a live index
+# logdive --db ~/my-index.db prune --older-than 30d
+
+# Prune without confirmation prompt (for automation)
+# logdive --db ~/my-index.db prune --older-than 7d --yes
+```
+
+---
+
+## Multi-format ingestion in depth
+
+### logfmt
+
+`worker.log` uses logfmt — the format popularized by go-kit and Heroku. Keys `timestamp`, `level`, and `message` map to indexed columns; all other keys go into the queryable `fields` blob.
+
+```bash
+logdive --db /tmp/logdive-examples.db ingest --file examples/worker.log --format logfmt
+
+# Query the worker logs just like any JSON log
+logdive --db /tmp/logdive-examples.db query 'tag=worker AND level=error'
+logdive --db /tmp/logdive-examples.db query 'queue=email AND level!=info'
+logdive --db /tmp/logdive-examples.db query 'job_type=send_confirmation'
+```
+
+### Plain text
+
+`deploy.log` is raw deployment output — no structured fields at all. Use `--format plain` to ingest it; each line becomes the `message` field. Use `--timestamp-now` to stamp entries at ingest time (otherwise lines without a `timestamp` field are skipped).
+
+```bash
+logdive --db /tmp/logdive-examples.db ingest \
+  --file examples/deploy.log \
+  --format plain \
+  --timestamp-now \
+  --tag deploy
+
+# Query by content — CONTAINS is the only useful operator here
+logdive --db /tmp/logdive-examples.db query 'tag=deploy AND message contains "failed"'
+logdive --db /tmp/logdive-examples.db query 'tag=deploy AND message contains "Build step"'
+logdive --db /tmp/logdive-examples.db query 'tag=deploy AND message contains "successful"'
+```
+
+### Piping live sources
+
+```bash
+# Docker container logs
+docker logs -f my-container | logdive --db ~/my-index.db ingest --tag my-container
+
+# systemd journal (JSON format)
+journalctl --output=json -f | logdive --db ~/my-index.db ingest --tag systemd
+
+# kubectl pod logs
+kubectl logs -f my-pod | logdive --db ~/my-index.db ingest --tag k8s-my-pod
+
+# Pipe with --follow for a file that's still being written to
+logdive --db ~/my-index.db ingest --file /var/log/app.log --follow
+```
+
+---
+
+## Cleanup
+
+```bash
+rm /tmp/logdive-examples.db
+```
+
+---
+
+## Now try your own logs
+
+```bash
+DB=~/my-index.db
+logdive --db $DB ingest --file /path/to/your-app.log
+logdive --db $DB stats
+logdive --db $DB query 'level=error last 1h'
+logdive --db $DB query '(level=error OR level=warn) AND service=your-service'
+```
+
+See the main [README](../README.md) for the full query language reference and performance numbers.
