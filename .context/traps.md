@@ -102,3 +102,55 @@ The prerelease script detects the Cargo version and uses `cargo publish
 --dry-run --workspace` only when Cargo ≥1.90. On older toolchains it falls back
 to verifying only `logdive-core`. The full workspace dry-run is the authoritative
 check; if you're on a toolchain older than 1.90, the pass on dry-run does not
+guarantee the cli and api crates will publish cleanly.
+
+---
+
+## QEMU multi-arch Docker builds — ~12 min cold, use mode=min cache
+
+The docker.yml workflow builds `linux/amd64` and `linux/arm64` in a single
+`docker buildx` step using QEMU for cross-arch emulation on the amd64 GHA
+runner. A cold build (no cache) takes roughly 12 minutes. The GHA cache
+(`type=gha, mode=min`) reduces this to ~3–4 minutes on warm runs. Cache keys
+are per-branch. A new branch on its first push will always be cold.
+
+---
+
+## Distroless runtime — no shell, no curl, no RUN in runtime stage
+
+Since v0.3.0, the Docker runtime stage is `gcr.io/distroless/cc-debian12:nonroot`
+(uid 65532). There is no shell, no curl, no package manager. Consequences:
+
+1. **`RUN` commands in the runtime stage are impossible.** Any directory or file
+   that must exist at runtime (e.g. `/data`) must be created in the builder stage
+   and `COPY`-ed to runtime: `COPY --from=builder /data /data`.
+
+2. **The HEALTHCHECK cannot use curl.** The `--health-check` flag on `logdive-api`
+   opens a `std::net::TcpStream` to its own port and exits 0/1. This is the only
+   health-check mechanism that works without a shell or HTTP client.
+   `HEALTHCHECK CMD ["/usr/local/bin/logdive-api", "--health-check"]`.
+
+3. **Debugging a running distroless container is painful.** There is no shell to
+   exec into. Use `docker cp` to extract files, or add a debug stage in the
+   Dockerfile that uses a full image.
+
+---
+
+## ALTER TABLE ADD COLUMN cannot add generated/virtual columns in SQLite
+
+When adding a derived field (e.g. `lower(level)`) to an existing schema, you
+cannot use `ALTER TABLE log_entries ADD COLUMN level_norm TEXT GENERATED ALWAYS
+AS (lower(level)) VIRTUAL` — SQLite's `ALTER TABLE ADD COLUMN` does not support
+generated columns. The correct approach (used for `idx_level_norm` in v0.3.0)
+is a functional expression index: `CREATE INDEX IF NOT EXISTS idx_level_norm ON
+log_entries(lower(level))`. The query must then use `lower(level) = ?` with a
+Rust-lowercased bind value to hit the index.
+
+---
+
+## execute() / execute_at() breaking change in v0.3.0
+
+Third parameter changed from `limit: Option<usize>` to `opts: QueryOptions`.
+`QueryOptions { limit: Option<usize>, offset: Option<usize> }`. All call sites
+in the CLI, API, and tests must pass `QueryOptions`. The old signature no longer
+exists — do not add overloads or backwards-compat shims.
