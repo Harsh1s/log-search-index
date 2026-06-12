@@ -170,3 +170,175 @@ async fn main() -> Result<()> {
 /// TCP-connect to the server's own port and exit the process.
 ///
 /// Exits 0 when the connection succeeds, 1 when it fails. No HTTP request is
+/// made — a successful TCP accept is enough to confirm the server is up. This
+/// is intentional: it avoids importing an HTTP client and keeps the health
+/// check dependency-free and shell-free for distroless container images.
+fn run_health_check(port: u16) -> ! {
+    use std::net::TcpStream;
+    match TcpStream::connect(("127.0.0.1", port)) {
+        Ok(_) => std::process::exit(0),
+        Err(e) => {
+            eprintln!("health check failed (port {port}): {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Index bootstrap
+// ---------------------------------------------------------------------------
+
+/// Ensure the index file exists, creating an empty one if it does not.
+///
+/// Creating the parent directory first handles the common Docker case where
+/// `/data` is a freshly mounted named volume that contains no files yet.
+///
+/// If the path is genuinely wrong — a non-existent ancestor directory that
+/// cannot be created, a permission-denied path, a file that exists but is
+/// not a valid SQLite database — this function returns an error, which
+/// surfaces as a startup failure with a clear message rather than as a
+/// request-time 500.
+fn ensure_index_exists(db: &std::path::Path) -> Result<()> {
+    if db.exists() {
+        return Ok(());
+    }
+
+    // Create parent directories (e.g. /data when a fresh Docker volume is
+    // mounted — the directory exists but may be empty, or the default
+    // ~/.logdive/ on a first-run host install).
+    if let Some(parent) = db.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| LogdiveError::io_at(db, e))?;
+        }
+    }
+
+    // Open in read-write mode to initialise the schema, then drop
+    // immediately. All subsequent query-time access uses open_read_only.
+    let _ = Indexer::open(db)?;
+
+    tracing::info!(path = %db.display(), "created empty index at startup");
+    eprintln!(
+        "logdive-api: no index found at {path} — created an empty one. \
+         Ingest logs with: logdive ingest <file>  \
+         (or: docker run --entrypoint logdive ... ingest <file>)",
+        path = db.display(),
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CORS origin parsing
+// ---------------------------------------------------------------------------
+
+/// Parse the raw `--cors-origins` string into a list of [`HeaderValue`]s
+/// ready for [`build_router`].
+///
+/// Accepts a comma-separated list of origins. Trims whitespace around each
+/// entry and ignores empty tokens, so `"a, b,"` and `"a,b"` are equivalent.
+///
+/// Rules:
+/// - `None` or an all-whitespace/empty string → CORS disabled (`[]`).
+/// - A single `*` → any origin allowed.
+/// - `*` mixed with other values → error (meaningless and likely a mistake).
+/// - Each specific origin must be a valid HTTP header value; invalid bytes
+///   or control characters → error naming the offending origin.
+///
+/// Errors are returned as human-readable strings for display at startup.
+fn parse_cors_origins(raw: Option<String>) -> std::result::Result<Vec<HeaderValue>, String> {
+    let Some(s) = raw else {
+        return Ok(vec![]);
+    };
+
+    let parts: Vec<&str> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Wildcard must be the sole value — mixing it with specific origins is
+    // both spec-meaningless and likely a configuration mistake.
+    if parts.contains(&"*") {
+        if parts.len() != 1 {
+            return Err(
+                "`*` (allow any origin) cannot be combined with specific origins; \
+                 use either `*` alone or a list of explicit origins"
+                    .to_string(),
+            );
+        }
+        return Ok(vec![HeaderValue::from_static("*")]);
+    }
+
+    parts
+        .iter()
+        .map(|origin| {
+            HeaderValue::from_str(origin).map_err(|_| {
+                format!(
+                    "`{origin}` is not a valid HTTP header value \
+                     (check for control characters or non-ASCII bytes)"
+                )
+            })
+        })
+        .collect()
+}
+
+/// One-line CORS summary for the startup tracing span.
+fn cors_summary(origins: &[HeaderValue]) -> String {
+    match origins {
+        [] => "disabled".to_string(),
+        [star] if star.as_bytes() == b"*" => "any origin (*)".to_string(),
+        _ => format!("{} specific origin(s)", origins.len()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_env("LOGDIVE_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
+/// Future that completes when a shutdown signal arrives.
+///
+/// Listens for Ctrl-C on all platforms; additionally listens for SIGTERM
+/// on Unix so the server shuts down cleanly under `systemctl stop` and
+/// `docker stop`. Any `io::Error` from signal setup is swallowed and the
+/// corresponding future is replaced by `std::future::pending()` — losing
+/// one signal handler shouldn't crash the server at startup.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %e, "failed to install Ctrl-C handler");
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("Ctrl-C received, shutting down");
+        }
