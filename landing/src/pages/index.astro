@@ -162,3 +162,86 @@ logdive/
       <div class="section-head">
         <span class="eyebrow">Get it</span>
         <h2>Install in one command.</h2>
+        <p>Pick whichever your build pipeline already understands.</p>
+      </div>
+      <Tabs tabs={[
+        { id: 'cargo', label: 'cargo' },
+        { id: 'docker', label: 'docker' },
+        { id: 'source', label: 'from source' },
+      ]}>
+        <div class="tab-panel is-active" data-panel="cargo">
+          <CodeBlock id="cargo-install">
+<span class="prompt">$</span> cargo install logdive
+<span class="prompt">$</span> cargo install logdive-api  <span class="cm"># optional, for the HTTP server</span>
+          </CodeBlock>
+        </div>
+        <div class="tab-panel" data-panel="docker">
+          <CodeBlock id="docker-install">
+<span class="prompt">$</span> docker pull ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION}
+<span class="prompt">$</span> docker run -d \
+    --name logdive \
+    -v logdive-data:/data \
+    -p 4000:4000 \
+    ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION}
+          </CodeBlock>
+        </div>
+        <div class="tab-panel" data-panel="source">
+          <CodeBlock id="source-install">
+<span class="prompt">$</span> git clone https://github.com/Aryagorjipour/logdive
+<span class="prompt">$</span> cd logdive
+<span class="prompt">$</span> cargo build --release
+<span class="prompt">$</span> ./target/release/logdive --version
+          </CodeBlock>
+        </div>
+      </Tabs>
+    </div>
+  </section>
+
+</main>
+
+<style>
+  .gh-btn {
+    gap: 0;
+  }
+  .gh-stars-divider {
+    display: inline-block;
+    width: 1px;
+    height: 13px;
+    background: currentColor;
+    opacity: 0.25;
+    margin: 0 10px;
+    vertical-align: middle;
+    flex-shrink: 0;
+  }
+  .gh-star-icon {
+    vertical-align: middle;
+    margin-right: 4px;
+    opacity: 0.65;
+    flex-shrink: 0;
+  }
+  #gh-stars-count {
+    font-variant-numeric: tabular-nums;
+    min-width: 1ch;
+  }
+</style>
+
+<script>
+  (async () => {
+    try {
+      const res = await fetch('https://api.github.com/repos/Aryagorjipour/logdive', {
+        headers: { Accept: 'application/vnd.github.v3+json' },
+      });
+      if (!res.ok) return;
+      const { stargazers_count } = await res.json();
+      const el = document.getElementById('gh-stars-count');
+      if (el && typeof stargazers_count === 'number') {
+        el.textContent = stargazers_count >= 1000
+          ? `${(stargazers_count / 1000).toFixed(1)}k`
+          : String(stargazers_count);
+      }
+    } catch {
+      // leave "—" placeholder on failure
+    }
+  })();
+</script>
+</Base>

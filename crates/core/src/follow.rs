@@ -390,3 +390,199 @@ mod tests {
     #[test]
     fn unicode_lines_preserved() {
         let mut f = NamedTempFile::new().unwrap();
+        let mut tailer = FileTailer::open(f.path()).unwrap();
+
+        append(&mut f, "héllo wörld 日本語\n".as_bytes());
+        let lines = tailer.read_new_lines().unwrap();
+        assert_eq!(lines, vec!["héllo wörld 日本語"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10
+    // -----------------------------------------------------------------------
+    /// CRLF line endings have the `\r` stripped; the returned string has no
+    /// trailing carriage return.
+    #[test]
+    fn crlf_line_endings_stripped() {
+        let mut f = NamedTempFile::new().unwrap();
+        let mut tailer = FileTailer::open(f.path()).unwrap();
+
+        append(&mut f, b"line1\r\nline2\r\n");
+        let lines = tailer.read_new_lines().unwrap();
+        assert_eq!(lines, vec!["line1", "line2"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11
+    // -----------------------------------------------------------------------
+    /// Blank lines (just `\n`) are returned as empty strings, not silently
+    /// dropped.
+    #[test]
+    fn blank_lines_are_returned() {
+        let mut f = NamedTempFile::new().unwrap();
+        let mut tailer = FileTailer::open(f.path()).unwrap();
+
+        append(&mut f, b"\n\n");
+        let lines = tailer.read_new_lines().unwrap();
+        assert_eq!(lines, vec!["", ""], "got {lines:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12
+    // -----------------------------------------------------------------------
+    /// Truncation (same inode, size shrinks below offset) resets the offset
+    /// and reads from the start of the truncated file.
+    #[test]
+    fn truncation_resets_offset() {
+        let mut f = NamedTempFile::new().unwrap();
+        let mut tailer = FileTailer::open(f.path()).unwrap();
+
+        // Write and consume some data so the offset is non-zero.
+        append(&mut f, b"old data\n");
+        let first = tailer.read_new_lines().unwrap();
+        assert_eq!(first, vec!["old data"]);
+
+        // Truncate the file to zero.
+        f.as_file().set_len(0).unwrap();
+        f.as_file().seek(SeekFrom::Start(0)).unwrap();
+
+        // Write fresh content to the now-empty file.
+        append(&mut f, b"fresh\n");
+
+        let second = tailer.read_new_lines().unwrap();
+        assert_eq!(second, vec!["fresh"], "got {second:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13
+    // -----------------------------------------------------------------------
+    /// Rotation via rename: the watched path is renamed away, a new file is
+    /// created at the same path, and new content is appended. The tailer
+    /// should re-open and return the new content.
+    #[test]
+    fn rotation_via_rename_reopens_file() {
+        let dir = TempDir::new().unwrap();
+        let watched = dir.path().join("app.log");
+
+        // Create the initial file.
+        std::fs::write(&watched, b"initial\n").unwrap();
+        let mut tailer = FileTailer::open(&watched).unwrap();
+
+        // Rotate: rename the current file away, create a new one.
+        let rotated = dir.path().join("app.log.1");
+        std::fs::rename(&watched, &rotated).unwrap();
+        // Create new file at the watched path.
+        let mut new_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&watched)
+            .unwrap();
+        append_file(&mut new_file, b"new\n");
+
+        let lines = tailer.read_new_lines().unwrap();
+        assert_eq!(lines, vec!["new"], "got {lines:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14
+    // -----------------------------------------------------------------------
+    /// After a rotation, subsequent appends to the new file continue to
+    /// arrive in correct order across multiple reads.
+    #[test]
+    fn rotation_then_more_appends() {
+        let dir = TempDir::new().unwrap();
+        let watched = dir.path().join("app.log");
+
+        std::fs::write(&watched, b"before\n").unwrap();
+        let mut tailer = FileTailer::open(&watched).unwrap();
+
+        // Rotate.
+        let rotated = dir.path().join("app.log.1");
+        std::fs::rename(&watched, &rotated).unwrap();
+        let mut new_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&watched)
+            .unwrap();
+
+        // First batch after rotation.
+        append_file(&mut new_file, b"first\n");
+        let batch1 = tailer.read_new_lines().unwrap();
+        assert_eq!(batch1, vec!["first"], "batch1: {batch1:?}");
+
+        // Second batch — more appends to the same new file.
+        append_file(&mut new_file, b"second\nthird\n");
+        let batch2 = tailer.read_new_lines().unwrap();
+        assert_eq!(batch2, vec!["second", "third"], "batch2: {batch2:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15
+    // -----------------------------------------------------------------------
+    /// `FileTailer::open` on a non-existent path returns `Err`.
+    #[test]
+    fn missing_file_errors_on_open() {
+        let result = FileTailer::open("/nonexistent/path/that/does/not/exist.log");
+        assert!(result.is_err(), "expected Err on missing file");
+        assert!(
+            matches!(result.unwrap_err(), LogdiveError::Io { .. }),
+            "expected LogdiveError::Io"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16
+    // -----------------------------------------------------------------------
+    /// If the watched file is deleted after `open`, `read_new_lines` returns
+    /// `Ok(vec![])` — the NotFound branch in the metadata check. The caller
+    /// can retry on the next poll cycle.
+    #[test]
+    fn file_deleted_after_open_returns_ok_empty() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_path_buf();
+
+        let mut tailer = FileTailer::open(&path).unwrap();
+
+        // Delete the file while the tailer holds it open.
+        drop(f);
+        assert!(!path.exists(), "file must be gone before read");
+
+        let result = tailer.read_new_lines();
+        assert!(result.is_ok(), "deleted file must not return Err");
+        assert!(
+            result.unwrap().is_empty(),
+            "deleted file must return empty line list"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17
+    // -----------------------------------------------------------------------
+    /// After several empty-read cycles, a burst of lines appended all at once
+    /// must be returned in full on the first read that finds data.
+    #[test]
+    fn burst_of_lines_after_idle_reads_returns_all() {
+        let mut f = NamedTempFile::new().unwrap();
+        let mut tailer = FileTailer::open(f.path()).unwrap();
+
+        // Multiple empty reads to confirm the idle state.
+        for _ in 0..3 {
+            assert!(tailer.read_new_lines().unwrap().is_empty());
+        }
+
+        // Burst: append 50 lines at once.
+        let burst: String = (0..50).map(|i| format!("line-{i}\n")).collect();
+        append(&mut f, burst.as_bytes());
+
+        let lines = tailer.read_new_lines().unwrap();
+        assert_eq!(
+            lines.len(),
+            50,
+            "all 50 burst lines must arrive in one read"
+        );
+        assert_eq!(lines[0], "line-0");
+        assert_eq!(lines[49], "line-49");
+    }
+}

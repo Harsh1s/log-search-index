@@ -106,3 +106,58 @@ Examples:
 ## How It Work
 
 ```
+/caveman-compress CLAUDE.md
+        ↓
+detect file type        (no tokens)
+        ↓
+Claude compresses       (tokens — one call)
+        ↓
+validate output         (no tokens)
+  checks: headings, code blocks, URLs, file paths, bullets
+        ↓
+if errors: Claude fixes cherry-picked issues only   (tokens — targeted fix)
+  does NOT recompress — only patches broken parts
+        ↓
+retry up to 2 times
+        ↓
+write compressed → CLAUDE.md
+write original   → CLAUDE.original.md
+```
+
+Only two things use tokens: initial compression + targeted fix if validation fails. Everything else is local Python.
+
+## What Is Preserved
+
+Caveman compress natural language. It never touch:
+
+- Code blocks (` ``` ` fenced or indented)
+- Inline code (`` `backtick content` ``)
+- URLs and links
+- File paths (`/src/components/...`)
+- Commands (`npm install`, `git commit`)
+- Technical terms, library names, API names
+- Headings (exact text preserved)
+- Tables (structure preserved, cell text compressed)
+- Dates, version numbers, numeric values
+
+## Why This Matter
+
+`CLAUDE.md` loads on **every session start**. A 1000-token project memory file costs tokens every single time you open a project. Over 100 sessions that's 100,000 tokens of overhead — just for context you already wrote.
+
+Caveman cut that by ~46% on average. Same instructions. Same accuracy. Less waste.
+
+```
+┌────────────────────────────────────────────┐
+│  TOKEN SAVINGS PER FILE    █████       46% │
+│  SESSIONS THAT BENEFIT     ██████████ 100% │
+│  INFORMATION PRESERVED     ██████████ 100% │
+│  SETUP TIME                █            1x │
+└────────────────────────────────────────────┘
+```
+
+## Part of Caveman
+
+This skill is part of the [caveman](https://github.com/JuliusBrussee/caveman) toolkit — making Claude use fewer tokens without losing accuracy.
+
+- **caveman** — make Claude *speak* like caveman (cuts response tokens ~65%)
+- **caveman-compress** — make Claude *read* less (cuts context tokens ~46%)

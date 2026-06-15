@@ -145,3 +145,4 @@ fn bench_parse_and_insert(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_insert_batch, bench_parse_and_insert);
+criterion_main!(benches);

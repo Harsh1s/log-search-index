@@ -106,3 +106,57 @@ mod tests {
     #[tokio::test]
     async fn no_cors_origins_does_not_add_acao_header() {
         let resp = build_router(make_state(), vec![])
+            .oneshot(version_request("https://example.com"))
+            .await
+            .unwrap();
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "CORS disabled: ACAO header must be absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn wildcard_cors_adds_acao_star_for_any_origin() {
+        let resp = build_router(make_state(), vec![HeaderValue::from_static("*")])
+            .oneshot(version_request("https://example.com"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+        );
+    }
+
+    #[tokio::test]
+    async fn specific_origin_reflects_matching_origin() {
+        let allowed: HeaderValue = "https://app.example.com".parse().unwrap();
+        let resp = build_router(make_state(), vec![allowed])
+            .oneshot(version_request("https://app.example.com"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.example.com"),
+        );
+    }
+
+    #[tokio::test]
+    async fn specific_origin_omits_acao_for_unmatched_origin() {
+        let allowed: HeaderValue = "https://app.example.com".parse().unwrap();
+        let resp = build_router(make_state(), vec![allowed])
+            .oneshot(version_request("https://evil.example.com"))
+            .await
+            .unwrap();
+        // CORS enforcement is the browser's job. The server omits ACAO for
+        // a non-matching origin but does not reject the request outright —
+        // that is correct per spec.
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "non-allowed origin must not receive ACAO header"
+        );
+    }
+}

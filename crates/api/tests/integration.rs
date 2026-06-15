@@ -637,3 +637,4 @@ async fn query_with_offset_beyond_result_set_returns_empty() {
         0,
         "offset past end of result set must return empty"
     );
+}

@@ -349,3 +349,4 @@ mod tests {
         let out = format_stats(Path::new("/tmp/x.db"), &stats, 0);
         assert!(out.contains("Entries:       3"));
     }
+}

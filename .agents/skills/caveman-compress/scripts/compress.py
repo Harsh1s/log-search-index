@@ -250,3 +250,5 @@ def compress_file(filepath: Path) -> bool:
             build_fix_prompt(original_text, compressed, result.errors)
         )
         filepath.write_text(compressed)
+
+    return True

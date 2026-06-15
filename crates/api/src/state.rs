@@ -108,3 +108,59 @@ mod tests {
         let state = AppState::new(db.clone());
         let stats = state
             .with_connection(|idx| idx.stats())
+            .await
+            .expect("with_connection");
+        assert_eq!(stats.entries, 0);
+        assert!(stats.tags.is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_connection_errors_when_db_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.db");
+
+        let state = AppState::new(missing);
+        let err = state
+            .with_connection(|idx| idx.stats())
+            .await
+            .expect_err("should fail when db missing");
+        // Open_read_only surfaces SQLite's "unable to open" as LogdiveError::Sqlite.
+        assert!(matches!(err, LogdiveError::Sqlite(_)));
+    }
+
+    #[tokio::test]
+    async fn with_connection_uses_read_only_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro.db");
+        let _ = Indexer::open(&db).unwrap();
+
+        let state = AppState::new(db);
+        let result = state
+            .with_connection(|idx| {
+                // Try to write via the RO connection — must fail.
+                idx.connection()
+                    .execute(
+                        "INSERT INTO log_entries (timestamp, raw, raw_hash) \
+                         VALUES ('x', 'y', 'z')",
+                        [],
+                    )
+                    .map_err(LogdiveError::from)
+            })
+            .await;
+        assert!(result.is_err(), "expected RO write rejection");
+    }
+
+    #[tokio::test]
+    async fn with_connection_surfaces_panic_as_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("panic.db");
+        let _ = Indexer::open(&db).unwrap();
+
+        let state = AppState::new(db);
+        let err = state
+            .with_connection(|_idx| -> Result<()> { panic!("intentional test panic") })
+            .await
+            .expect_err("panic should propagate as error, not silent success");
+        assert!(matches!(err, LogdiveError::Io { .. }));
+    }
+}

@@ -160,3 +160,327 @@ fn resolve_cutoff(args: &PruneArgs) -> std::result::Result<DateTime<Utc>, String
 /// Resolve a relative `--older-than` duration spec against a given `now`.
 ///
 /// `now` is a parameter rather than read internally so the unit tests can
+/// pin it and assert exact cutoffs.
+fn resolve_older_than(
+    spec: &str,
+    now: DateTime<Utc>,
+) -> std::result::Result<DateTime<Utc>, String> {
+    let spec = spec.trim();
+
+    // The unit is the final character; `len_utf8()` keeps the byte split on
+    // a char boundary even if a stray multi-byte char is supplied.
+    let unit_char = spec
+        .chars()
+        .last()
+        .ok_or_else(|| "empty duration".to_string())?;
+    let num_part = &spec[..spec.len() - unit_char.len_utf8()];
+
+    let bad = || {
+        format!(
+            "invalid duration {spec:?}: expected a whole number followed by \
+             'm', 'h', or 'd' (e.g. '30d', '12h', '90m')"
+        )
+    };
+
+    // Parse as u64 first — this rejects negatives ('-5' is not a valid u64).
+    let amount_u64: u64 = num_part.parse().map_err(|_| bad())?;
+    let amount =
+        i64::try_from(amount_u64).map_err(|_| format!("duration {spec:?} is too large"))?;
+
+    let seconds = match unit_char {
+        'm' => amount.checked_mul(60),
+        'h' => amount.checked_mul(60 * 60),
+        'd' => amount.checked_mul(24 * 60 * 60),
+        _ => return Err(bad()),
+    }
+    .ok_or_else(|| format!("duration {spec:?} is too large"))?;
+
+    now.checked_sub_signed(chrono::Duration::seconds(seconds))
+        .ok_or_else(|| format!("duration {spec:?} is too large"))
+}
+
+/// Resolve an absolute `--before` datetime spec.
+///
+/// Accepts the same three shapes the query language's `since` clause does:
+/// RFC3339, a naive `YYYY-MM-DD HH:MM:SS` / `YYYY-MM-DDTHH:MM:SS` (UTC), or
+/// a bare `YYYY-MM-DD` date (UTC midnight).
+fn resolve_before(spec: &str) -> std::result::Result<DateTime<Utc>, String> {
+    let spec = spec.trim();
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(spec) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    for fmt in &["%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(spec, fmt) {
+            return Ok(Utc.from_utc_datetime(&ndt));
+        }
+    }
+    if let Ok(nd) = NaiveDate::parse_from_str(spec, "%Y-%m-%d") {
+        let ndt = nd.and_hms_opt(0, 0, 0).expect("00:00:00 is a valid time");
+        return Ok(Utc.from_utc_datetime(&ndt));
+    }
+
+    Err(format!(
+        "invalid datetime {spec:?}: expected RFC3339, \
+         `YYYY-MM-DD HH:MM:SS`, or `YYYY-MM-DD`"
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation prompt
+// ---------------------------------------------------------------------------
+
+/// Prompt the user to confirm a destructive prune.
+///
+/// Prints the doomed-row count and cutoff, then reads one line from stdin.
+/// Returns `true` only for `y` / `yes` (case-insensitive); every other
+/// answer — including an empty line — is treated as "no", matching the
+/// `[y/N]` convention where the capital `N` is the default.
+fn confirm(count: i64, cutoff: &str) -> Result<bool> {
+    print!(
+        "This will permanently delete {count} {} older than {cutoff}.\n\
+         Continue? [y/N] ",
+        plural_entries(count as u64)
+    );
+    io::stdout().flush().map_err(LogdiveError::IoBare)?;
+
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(LogdiveError::IoBare)?;
+
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+/// `"entry"` for exactly one, `"entries"` otherwise.
+fn plural_entries(n: u64) -> &'static str {
+    if n == 1 { "entry" } else { "entries" }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fixed reference "now" for deterministic --older-than assertions.
+    fn now() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 5, 14, 12, 0, 0).unwrap()
+    }
+
+    // --- resolve_older_than ------------------------------------------------
+
+    #[test]
+    fn older_than_minutes() {
+        let cutoff = resolve_older_than("45m", now()).unwrap();
+        assert_eq!(
+            cutoff,
+            Utc.with_ymd_and_hms(2026, 5, 14, 11, 15, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn older_than_hours() {
+        let cutoff = resolve_older_than("2h", now()).unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn older_than_days() {
+        // 2026-05-14 minus 30 days = 2026-04-14.
+        let cutoff = resolve_older_than("30d", now()).unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 14, 12, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn older_than_zero_resolves_to_now() {
+        // "0d" is a valid (aggressive) spec — cutoff equals `now`.
+        let cutoff = resolve_older_than("0d", now()).unwrap();
+        assert_eq!(cutoff, now());
+    }
+
+    #[test]
+    fn older_than_is_trimmed() {
+        let cutoff = resolve_older_than("  2h  ", now()).unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 5, 14, 10, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn older_than_rejects_unknown_unit() {
+        let err = resolve_older_than("5y", now()).unwrap_err();
+        assert!(
+            err.contains("5y"),
+            "message should echo the bad spec: {err}"
+        );
+    }
+
+    #[test]
+    fn older_than_rejects_missing_number() {
+        let err = resolve_older_than("d", now()).unwrap_err();
+        assert!(err.contains("\"d\""));
+    }
+
+    #[test]
+    fn older_than_rejects_missing_unit() {
+        // "30" with no unit: the trailing '0' is not a valid unit char.
+        let err = resolve_older_than("30", now()).unwrap_err();
+        assert!(err.contains("\"30\""));
+    }
+
+    #[test]
+    fn older_than_rejects_negative_number() {
+        // '-5' does not parse as u64, so this is rejected at the number step.
+        let err = resolve_older_than("-5d", now()).unwrap_err();
+        assert!(err.contains("\"-5d\""));
+    }
+
+    #[test]
+    fn older_than_rejects_empty() {
+        let err = resolve_older_than("", now()).unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn older_than_rejects_non_numeric_amount() {
+        let err = resolve_older_than("abcd", now()).unwrap_err();
+        assert!(err.contains("\"abcd\""));
+    }
+
+    // --- resolve_before ----------------------------------------------------
+
+    #[test]
+    fn before_accepts_rfc3339() {
+        let cutoff = resolve_before("2026-04-15T10:30:00Z").unwrap();
+        assert_eq!(
+            cutoff,
+            Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn before_accepts_rfc3339_with_offset() {
+        // +02:00 offset normalizes to 08:30 UTC.
+        let cutoff = resolve_before("2026-04-15T10:30:00+02:00").unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 15, 8, 30, 0).unwrap());
+    }
+
+    #[test]
+    fn before_accepts_naive_datetime_space_separated() {
+        let cutoff = resolve_before("2026-04-15 10:30:00").unwrap();
+        assert_eq!(
+            cutoff,
+            Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn before_accepts_naive_datetime_t_separated() {
+        let cutoff = resolve_before("2026-04-15T10:30:00").unwrap();
+        assert_eq!(
+            cutoff,
+            Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn before_accepts_bare_date_as_utc_midnight() {
+        let cutoff = resolve_before("2026-04-15").unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn before_is_trimmed() {
+        let cutoff = resolve_before("  2026-04-15  ").unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn before_rejects_garbage() {
+        let err = resolve_before("not-a-date").unwrap_err();
+        assert!(err.contains("not-a-date"));
+    }
+
+    #[test]
+    fn before_rejects_impossible_date() {
+        let err = resolve_before("2026-13-99").unwrap_err();
+        assert!(err.contains("2026-13-99"));
+    }
+
+    #[test]
+    fn before_rejects_empty() {
+        let err = resolve_before("").unwrap_err();
+        assert!(err.contains("invalid datetime"));
+    }
+
+    // --- resolve_cutoff routing -------------------------------------------
+
+    #[test]
+    fn cutoff_routes_to_older_than_when_only_that_is_set() {
+        let args = PruneArgs {
+            older_than: Some("1d".to_string()),
+            before: None,
+            yes: false,
+        };
+        // Can't pin `now` through resolve_cutoff, but we can assert the
+        // cutoff is in the past relative to a freshly-taken now.
+        let cutoff = resolve_cutoff(&args).unwrap();
+        assert!(cutoff < Utc::now());
+    }
+
+    #[test]
+    fn cutoff_routes_to_before_when_only_that_is_set() {
+        let args = PruneArgs {
+            older_than: None,
+            before: Some("2026-04-15".to_string()),
+            yes: false,
+        };
+        let cutoff = resolve_cutoff(&args).unwrap();
+        assert_eq!(cutoff, Utc.with_ymd_and_hms(2026, 4, 15, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn cutoff_rejects_both_flags_set() {
+        // Defensive: clap's ArgGroup normally prevents this from ever
+        // reaching resolve_cutoff, but the function must not panic if it does.
+        let args = PruneArgs {
+            older_than: Some("1d".to_string()),
+            before: Some("2026-04-15".to_string()),
+            yes: false,
+        };
+        let err = resolve_cutoff(&args).unwrap_err();
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn cutoff_rejects_neither_flag_set() {
+        let args = PruneArgs {
+            older_than: None,
+            before: None,
+            yes: false,
+        };
+        let err = resolve_cutoff(&args).unwrap_err();
+        assert!(err.contains("required"));
+    }
+
+    #[test]
+    fn cutoff_propagates_resolution_errors() {
+        let args = PruneArgs {
+            older_than: Some("nonsense".to_string()),
+            before: None,
+            yes: false,
+        };
+        assert!(resolve_cutoff(&args).is_err());
+    }
+
+    // --- plural_entries ----------------------------------------------------
+
+    #[test]
+    fn plural_entries_singular_and_plural() {
+        assert_eq!(plural_entries(1), "entry");
+        assert_eq!(plural_entries(0), "entries");
+        assert_eq!(plural_entries(2), "entries");
+    }
+}

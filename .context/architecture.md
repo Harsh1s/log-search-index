@@ -148,3 +148,78 @@ CREATE INDEX IF NOT EXISTS idx_level      ON log_entries(level);
 CREATE INDEX IF NOT EXISTS idx_level_norm ON log_entries(lower(level));
 CREATE INDEX IF NOT EXISTS idx_tag        ON log_entries(tag);
 CREATE INDEX IF NOT EXISTS idx_timestamp  ON log_entries(timestamp);
+```
+
+Notes:
+- `timestamp TEXT NOT NULL` — rows without a timestamp are skipped at ingest,
+  never fabricated
+- `fields TEXT` — serialized `serde_json::Map<String, Value>`; queried via
+  `json_extract(fields, '$.fieldname')`
+- `raw TEXT NOT NULL` — original unparsed line; used as blake3 hash input
+- `raw_hash TEXT NOT NULL UNIQUE` — hex-encoded blake3 of `raw`; the dedup key
+- `ingested_at` — wall-clock UTC at insert time; not exposed in query language
+- `idx_level_norm` — functional expression index on `lower(level)`; added in v0.3.0;
+  idempotent — `CREATE INDEX IF NOT EXISTS` runs on every `Indexer::open()` so
+  existing databases pick it up automatically
+
+## Query grammar (as-built)
+
+From `crates/core/src/query.rs` implementation:
+
+```
+query     := or_expr [ TIME_RANGE ]
+or_expr   := and_expr (OR and_expr)*
+and_expr  := clause (AND clause)*
+clause    := field OP value
+           | field CONTAINS string
+           | "(" or_expr ")"
+           | TIME_RANGE
+field     := [a-zA-Z_][a-zA-Z0-9_.]*
+OP        := "=" | "!=" | ">" | "<"
+value     := string | number | bool
+string    := '"' .* '"' | bare_word
+TIME_RANGE := "last" duration | "since" datetime
+duration  := number ("m" | "h" | "d")
+```
+
+`AND` binds tighter than `OR`. Parentheses supported since v0.3.0. All keywords
+case-insensitive.
+
+Tokenizer is more permissive than the grammar: allows `-` and `:` inside idents
+so bare-word datetime literals (`2024-01-01T10:00:00Z`) and hyphenated values
+(`x-request-id`) tokenize correctly. `validate_field_name` in the parser then
+enforces the stricter field-name regex `[a-zA-Z_][a-zA-Z0-9_.]*` — hyphens and
+colons are allowed in *values* but not in *field names*.
+
+The executor re-validates field names at `column_for_field()` (defense-in-depth)
+before embedding them in `json_extract(fields, '$.fieldname')`.
+
+Level field queries are routed through `lower(level) = ?` with Rust-lowercased
+bind values, hitting the `idx_level_norm` functional index. This makes
+`level=ERROR`, `level=Error`, and `level=error` all match the same rows.
+
+## Dependency inventory
+
+| Crate | Version | Used in | Why | Would replace with |
+|---|---|---|---|---|
+| rusqlite | 0.32 (bundled) | core | SQLite bindings; bundled = no system dep | Nothing — locked decision |
+| blake3 | 1.5 | core | Fast non-cryptographic hash for dedup | Nothing — fast enough, stable API |
+| serde | 1 (derive) | core, api | Serialization framework | Nothing |
+| serde_json | 1 | core, cli, api | JSON parsing and serialization | Nothing |
+| chrono | 0.4 (serde) | core, cli | DateTime parsing for `since` clauses | Nothing |
+| thiserror | 1 | core | Error type derive macro | Nothing |
+| tracing | 0.1 | core, cli, api | Structured logging macros | Nothing |
+| tracing-subscriber | 0.3 (env-filter) | cli, api | Log subscriber, LOGDIVE_LOG env var | Nothing |
+| clap | 4.5 (derive, env) | cli, api | CLI argument parsing | Nothing |
+| anstream | 0.6 | cli | ANSI-aware output stream, NO_COLOR support | Nothing |
+| anstyle | 1 | cli | ANSI style types | Nothing |
+| notify | 6.1 | cli only | Filesystem event watcher for --follow | Nothing (--follow is Unix, notify is fine) |
+| ctrlc | 3.5 | cli only | Ctrl-C / SIGINT handler for follow loop | tokio::signal if CLI ever adds tokio |
+| axum | 0.7 | api | Async HTTP framework | Nothing |
+| tokio | 1 (full) | api | Async runtime | Nothing |
+| tower | 0.4 (util) | api | Service abstraction | Nothing |
+| tower-http | 0.6 (cors) | api | CORS middleware | Nothing — must match axum/tower versions |
+| tempfile | 3 | dev | Temp dirs in tests | Nothing |
+| criterion | 0.5 | dev | Benchmarks | Nothing |
+| proptest | 1 | dev | Property-based tests for query parser | Nothing |
+| http-body-util | 0.1 | api dev | Body collection in integration tests | Nothing |

@@ -204,3 +204,106 @@ mod tests {
         assert!(!parse_error_body(&text).is_empty());
     }
 
+    #[tokio::test]
+    async fn from_query_parse_error_directly_maps_to_bad_request() {
+        // Exercise the direct `From<QueryParseError> for AppError` bridge
+        // — this is the shim that makes `parse_query(...)?` work inside
+        // AppError-returning handlers.
+        let query_err = parse_query("level =").expect_err("should not parse");
+        let app_err: AppError = query_err.into();
+        let (status, text) = read_body(app_err.into_response()).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_ne!(parse_error_body(&text), "internal server error");
+    }
+
+    #[tokio::test]
+    async fn from_logdive_error_maps_invalid_datetime_to_bad_request() {
+        let err = LogdiveError::InvalidDatetime {
+            input: "not-a-date".to_string(),
+            reason: "bad format".to_string(),
+        };
+        let app_err: AppError = err.into();
+        let (status, text) = read_body(app_err.into_response()).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            parse_error_body(&text)
+                .to_lowercase()
+                .contains("not-a-date")
+        );
+    }
+
+    #[tokio::test]
+    async fn from_logdive_error_maps_unsafe_field_name_to_bad_request() {
+        let err = LogdiveError::UnsafeFieldName("service; DROP TABLE--".to_string());
+        let app_err: AppError = err.into();
+        let (status, _) = read_body(app_err.into_response()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn from_logdive_error_maps_other_to_internal() {
+        // Sqlite error from a missing read-only DB — this path classifies
+        // as internal because it's not a user-fault variant.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("also-missing.db");
+        let inner =
+            logdive_core::Indexer::open_read_only(&missing).expect_err("should fail on missing db");
+
+        let app_err: AppError = inner.into();
+        let (status, text) = read_body(app_err.into_response()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(parse_error_body(&text), "internal server error");
+    }
+
+    #[tokio::test]
+    async fn internal_error_body_never_contains_db_path() {
+        use std::path::PathBuf;
+        // An Io error carrying a sensitive path must be swallowed by
+        // AppError::Internal — the filesystem path must never reach the
+        // HTTP client.
+        let inner = logdive_core::LogdiveError::io_at(
+            PathBuf::from("/sensitive/path/to/index.db"),
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+        );
+        let err = AppError::Internal(inner);
+        let (status, text) = read_body(err.into_response()).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !text.contains("/sensitive/path"),
+            "filesystem path must not appear in HTTP response body",
+        );
+    }
+
+    #[tokio::test]
+    async fn internal_error_body_never_contains_sqlite_error_text() {
+        // SQLite's error for a missing read-only file is "unable to open
+        // database file". That string must be swallowed and never forwarded
+        // to the HTTP client.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing2.db");
+        let inner =
+            logdive_core::Indexer::open_read_only(&missing).expect_err("should fail on missing db");
+
+        let err = AppError::Internal(inner);
+        let (_, text) = read_body(err.into_response()).await;
+        assert!(
+            !text.contains("unable to open"),
+            "SQLite error text must not appear in HTTP body",
+        );
+        assert!(
+            !text.contains("database file"),
+            "SQLite error text must not appear in HTTP body",
+        );
+    }
+
+    #[test]
+    fn bad_request_constructor_accepts_anything_displayable() {
+        // Compile-time check that the helper works with &str, String, and
+        // formatted strings uniformly.
+        let _a: AppError = AppError::bad_request("literal");
+        let _b: AppError = AppError::bad_request(String::from("owned"));
+        let _c: AppError = AppError::bad_request(format_args!("formatted {}", 1));
+    }
+}

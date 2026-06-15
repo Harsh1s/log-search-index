@@ -130,3 +130,4 @@ fn mixed_format_batch_inserts_all_three_rows() {
     assert_eq!(stats.inserted, 3, "all three formats must be inserted");
     assert_eq!(stats.deduplicated, 0);
     assert_eq!(stats.skipped_no_timestamp, 0);
+}

@@ -1484,3 +1484,747 @@ const base = import.meta.env.BASE_URL;
           <p>JSON for the modern stack. logfmt for the old guard. Plain text for everything else. logdive sniffs the format per-line and normalizes into a single queryable shape.</p>
         </div>
       </div>
+    </div>
+  </section>
+
+  <!-- 5. ARCHITECTURE -->
+  <section>
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Architecture</span>
+        <h2>A three-crate workspace.</h2>
+        <p>The core does the work. The CLI is a thin wrapper. The API is read-only and optional. You can use one without the other two.</p>
+      </div>
+      <CodeBlock id="arch-tree" maxWidth="720px">
+<span class="cm">// Cargo workspace</span>
+logdive/
+├── <span class="kw">logdive-core</span>     <span class="cm">// ingestion, query parser, SQLite layer</span>
+├── <span class="kw">logdive</span>          <span class="cm">// CLI binary — 3.7 MB stripped</span>
+└── <span class="kw">logdive-api</span>      <span class="cm">// read-only HTTP server — 4.1 MB stripped</span>
+      </CodeBlock>
+    </div>
+  </section>
+
+  <!-- 6. COMPARISON -->
+  <section>
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">When to reach for logdive</span>
+        <h2>And, more importantly, when not to.</h2>
+      </div>
+      <div class="compare">
+        <p>logdive is for one machine — a laptop, a VPS, a single Kubernetes node. You point it at log files or a stdin stream, you query them later. That's the whole product. It replaces the loop of <code class="code-inline">grep | jq | awk</code> with something that has indexes and time ranges.</p>
+        <p><strong>Loki</strong> is the right answer when you have a fleet and you're already running Prometheus. <strong>Datadog</strong> is the right answer when someone else is paying the bill and you want a polished UI. <strong>Elastic</strong> is the right answer when you need full-text search at scale and have an ops team to run the cluster.</p>
+        <p>logdive is what you reach for in the gap below all of that — when the alternative isn't another observability platform, it's a fifteen-line shell pipeline that you'd rather not write again.</p>
+        <p class="honest"><strong>Honest limit:</strong> if you have more than one machine producing logs, logdive is the wrong tool. There is no clustering, no cross-host index, no shipping protocol. Use Loki.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7. PROJECT STATUS -->
+  <RoadmapStatus />
+
+  <!-- 8. INSTALLATION -->
+  <section>
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow">Get it</span>
+        <h2>Install in one command.</h2>
+        <p>Pick whichever your build pipeline already understands.</p>
+      </div>
+      <Tabs tabs={[
+        { id: 'cargo', label: 'cargo' },
+        { id: 'docker', label: 'docker' },
+        { id: 'source', label: 'from source' },
+      ]}>
+        <div class="tab-panel is-active" data-panel="cargo">
+          <CodeBlock id="cargo-install">
+<span class="prompt">$</span> cargo install logdive
+<span class="prompt">$</span> cargo install logdive-api  <span class="cm"># optional, for the HTTP server</span>
+          </CodeBlock>
+        </div>
+        <div class="tab-panel" data-panel="docker">
+          <CodeBlock id="docker-install">
+<span class="prompt">$</span> docker pull ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION}
+<span class="prompt">$</span> docker run -d \
+    --name logdive \
+    -v logdive-data:/data \
+    -p 4000:4000 \
+    ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION}
+          </CodeBlock>
+        </div>
+        <div class="tab-panel" data-panel="source">
+          <CodeBlock id="source-install">
+<span class="prompt">$</span> git clone https://github.com/Aryagorjipour/logdive
+<span class="prompt">$</span> cd logdive
+<span class="prompt">$</span> cargo build --release
+<span class="prompt">$</span> ./target/release/logdive --version
+          </CodeBlock>
+        </div>
+      </Tabs>
+    </div>
+  </section>
+
+</main>
+</Base>
+```
+
+- [ ] **Step 2: Verify build and check output**
+
+```bash
+cd landing && bun run build && ls dist/
+```
+
+Expected: `dist/logdive/index.html` exists.
+
+- [ ] **Step 3: Smoke test locally**
+
+```bash
+cd landing && bun run preview
+```
+
+Open `http://localhost:4321/logdive/` — verify hero, terminal, stat grid, pillars, roadmap lanes, installation tabs all render. Check dark mode toggle.
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /home/arysmart/Projects/Rust/logdive
+git add landing/src/pages/index.astro
+git commit -m "feat(landing): implement home page (7 sections)"
+```
+
+---
+
+## Task 8: Docs page (`docs.astro`)
+
+**Files:**
+- Create: `landing/src/pages/docs.astro`
+
+- [ ] **Step 1: Create `landing/src/pages/docs.astro`**
+
+```astro
+---
+// landing/src/pages/docs.astro
+import Base from '@layouts/Base.astro';
+import CodeBlock from '@components/CodeBlock.astro';
+import { CURRENT_VERSION } from '@data/roadmap';
+---
+<Base
+  title="Docs — logdive"
+  description="Documentation for logdive: CLI, HTTP API, query language, configuration."
+  activeNav="docs"
+>
+
+<div class="docs">
+
+  <aside class="docs-nav" aria-label="Documentation">
+    <h4>Get started</h4>
+    <ul>
+      <li><a href="#quick-start">Quick start</a></li>
+      <li><a href="#installation">Installation</a></li>
+    </ul>
+    <h4>The CLI</h4>
+    <ul>
+      <li><a href="#cli-ingest">ingest</a></li>
+      <li><a href="#cli-query">query</a></li>
+      <li><a href="#cli-stats">stats</a></li>
+      <li><a href="#cli-prune">prune</a></li>
+    </ul>
+    <h4>The HTTP API</h4>
+    <ul>
+      <li><a href="#api-query">/query</a></li>
+      <li><a href="#api-stats">/stats</a></li>
+      <li><a href="#api-version">/version</a></li>
+    </ul>
+    <h4>Reference</h4>
+    <ul>
+      <li><a href="#query-language">Query language</a></li>
+      <li><a href="#configuration">Configuration</a></li>
+      <li><a href="#docker">Docker</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+    </ul>
+  </aside>
+
+  <main class="docs-main">
+
+    <!-- QUICK START -->
+    <section id="quick-start">
+      <h2>Quick start</h2>
+      <p class="lede">Install the binary, ingest a log file, run a query. Five lines, no flags worth worrying about yet.</p>
+      <CodeBlock id="qs-block">
+<span class="prompt">$</span> cargo install logdive
+<span class="prompt">$</span> logdive ingest --file /var/log/app.log
+<span class="cm">  → 12,847 lines indexed in 78ms</span>
+<span class="prompt">$</span> logdive query <span class="str">'level=error last 1h'</span>
+<span class="prompt">$</span> logdive stats
+      </CodeBlock>
+      <p>By default, the index lives at <code class="code-inline">~/.logdive/index.db</code>. Override with <code class="code-inline">--db &lt;path&gt;</code> on any command, or set <code class="code-inline">LOGDIVE_DB</code>.</p>
+    </section>
+
+    <!-- INSTALLATION -->
+    <section id="installation">
+      <h2>Installation</h2>
+      <p>Three supported paths.</p>
+
+      <h3>From crates.io</h3>
+      <CodeBlock id="i-cargo">
+<span class="prompt">$</span> cargo install logdive
+<span class="prompt">$</span> cargo install logdive-api  <span class="cm"># optional, for the HTTP server</span>
+      </CodeBlock>
+
+      <h3>From Docker</h3>
+      <CodeBlock id="i-docker">
+<span class="prompt">$</span> docker pull ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION}
+      </CodeBlock>
+
+      <h3>From source</h3>
+      <CodeBlock id="i-source">
+<span class="prompt">$</span> git clone https://github.com/Aryagorjipour/logdive
+<span class="prompt">$</span> cd logdive
+<span class="prompt">$</span> cargo build --release
+      </CodeBlock>
+      <p class="lede">Resulting binaries: <code class="code-inline">logdive</code> at 3.7&thinsp;MB stripped, <code class="code-inline">logdive-api</code> at 4.1&thinsp;MB stripped. MSRV: Rust 1.85.</p>
+    </section>
+
+    <!-- CLI -->
+    <section id="cli-ingest">
+      <h2>The CLI</h2>
+      <p>One binary, four subcommands.</p>
+
+      <h3>ingest</h3>
+      <p>Reads a file or stdin, parses log lines, and inserts them into the SQLite index. Supports JSON (default), logfmt, and plain text. Deduplicates via blake3 content hash.</p>
+      <CodeBlock id="c-ingest">
+<span class="prompt">$</span> logdive ingest --file ./logs/app.log
+<span class="prompt">$</span> logdive ingest --file ./logs/app.log --format logfmt --tag production
+<span class="prompt">$</span> docker logs my-container | logdive ingest --tag my-container
+<span class="prompt">$</span> logdive ingest --file ./logs/app.log --follow
+      </CodeBlock>
+      <dl class="kv-list">
+        <dt>--file &lt;PATH&gt;</dt>
+        <dd>Read from a file. Mutually exclusive with stdin.</dd>
+        <dt>--format json|logfmt|plain</dt>
+        <dd>Input format. Default <code class="code-inline">json</code>.</dd>
+        <dt>--tag &lt;TAG&gt;</dt>
+        <dd>Attach a tag to every ingested entry that does not already have a <code class="code-inline">tag</code> field.</dd>
+        <dt>--timestamp-now</dt>
+        <dd>Assign current UTC time to entries lacking a <code class="code-inline">timestamp</code> field instead of skipping them.</dd>
+        <dt>--follow</dt>
+        <dd>Tail the file for new lines, similar to <code class="code-inline">tail -f</code>. Detects log rotation and truncation. Requires <code class="code-inline">--file</code>. Unix only (Windows support is v0.3+).</dd>
+        <dt>--db &lt;PATH&gt;</dt>
+        <dd>Database path override. Default <code class="code-inline">~/.logdive/index.db</code>. Also settable via <code class="code-inline">LOGDIVE_DB</code>.</dd>
+      </dl>
+
+      <h3 id="cli-query">query</h3>
+      <p>Evaluates a query expression and prints matching rows.</p>
+      <CodeBlock id="c-query">
+<span class="prompt">$</span> logdive query <span class="str">'level=error AND service=payments last 2h'</span>
+<span class="prompt">$</span> logdive query <span class="str">'level=error OR level=warn'</span> --format json
+<span class="prompt">$</span> logdive query <span class="str">'message contains "timeout" last 24h'</span>
+<span class="prompt">$</span> logdive query <span class="str">'since 2026-01-01'</span> --limit 0
+      </CodeBlock>
+      <dl class="kv-list">
+        <dt>--format pretty|json</dt>
+        <dd>Output format. Default <code class="code-inline">pretty</code> (colored). <code class="code-inline">json</code> is newline-delimited, pipe-friendly.</dd>
+        <dt>--limit &lt;N&gt;</dt>
+        <dd>Maximum results. Default 1000. Use <code class="code-inline">0</code> for unlimited.</dd>
+        <dt>--db &lt;PATH&gt;</dt>
+        <dd>Database path override.</dd>
+      </dl>
+
+      <h3 id="cli-stats">stats</h3>
+      <p>Reports aggregate metadata about the index — row count, time range, tags, and DB size on disk.</p>
+      <CodeBlock id="c-stats">
+<span class="prompt">$</span> logdive stats
+<span class="cm">logdive index: /home/user/.logdive/index.db
+  Entries:       42,317
+  Time range:    2026-03-14T08:22:01Z → 2026-04-22T19:45:03Z
+  Tags:          api, nginx, payments, worker, (untagged)
+  DB size:       8.4 MB (8,400,000 bytes)</span>
+      </CodeBlock>
+
+      <h3 id="cli-prune">prune</h3>
+      <p>Deletes entries outside a retention window, then vacuums the database file to reclaim disk space. Safe for cron.</p>
+      <CodeBlock id="c-prune">
+<span class="prompt">$</span> logdive prune --older-than 30d
+<span class="prompt">$</span> logdive prune --before 2026-01-01
+<span class="prompt">$</span> logdive prune --older-than 7d --yes
+      </CodeBlock>
+      <dl class="kv-list">
+        <dt>--older-than &lt;DURATION&gt;</dt>
+        <dd>Delete entries older than this. Format: integer + <code class="code-inline">m</code>, <code class="code-inline">h</code>, or <code class="code-inline">d</code>. E.g. <code class="code-inline">30d</code>, <code class="code-inline">24h</code>. Mutually exclusive with <code class="code-inline">--before</code>.</dd>
+        <dt>--before &lt;DATETIME&gt;</dt>
+        <dd>Delete entries before this datetime. Accepts RFC 3339, ISO naive datetime, or ISO date. Mutually exclusive with <code class="code-inline">--older-than</code>.</dd>
+        <dt>--yes</dt>
+        <dd>Skip the interactive <code class="code-inline">[y/N]</code> confirmation. Useful in scripts and cron.</dd>
+        <dt>--db &lt;PATH&gt;</dt>
+        <dd>Database path override.</dd>
+      </dl>
+    </section>
+
+    <!-- HTTP API -->
+    <section id="api-query">
+      <h2>The HTTP API</h2>
+      <p>The <code class="code-inline">logdive-api</code> binary serves the same query language over HTTP, read-only. No authentication — bind it to localhost.</p>
+      <CodeBlock id="api-run">
+<span class="prompt">$</span> logdive-api --db ~/.logdive/index.db --port 4000
+      </CodeBlock>
+
+      <h3>GET /query</h3>
+      <p>Runs a query and returns matching entries as newline-delimited JSON.</p>
+      <dl class="kv-list">
+        <dt>q (required)</dt>
+        <dd>Query expression. URL-encoded. Same syntax as CLI.</dd>
+        <dt>limit (optional)</dt>
+        <dd>Maximum results. Default 1000. <code class="code-inline">0</code> for unlimited.</dd>
+      </dl>
+      <CodeBlock id="api-q">
+<span class="prompt">$</span> curl <span class="str">'http://127.0.0.1:4000/query?q=level%3Derror&amp;limit=50'</span>
+<span class="cm">{"timestamp":"2026-05-21T14:02:31Z","level":"error","message":"..."}
+{"timestamp":"2026-05-21T14:02:33Z","level":"error","message":"..."}</span>
+      </CodeBlock>
+
+      <h3 id="api-stats">GET /stats</h3>
+      <p>Returns aggregate metadata as a single JSON object.</p>
+      <CodeBlock id="api-stats-ex">
+<span class="cm">{
+  "entries": 42317,
+  "min_timestamp": "2026-03-14T08:22:01Z",
+  "max_timestamp": "2026-04-22T19:45:03Z",
+  "tags": [null, "api", "nginx", "payments", "worker"],
+  "db_size_bytes": 8400000,
+  "db_path": "/home/user/.logdive/index.db"
+}</span>
+      </CodeBlock>
+
+      <h3 id="api-version">GET /version</h3>
+      <p>Returns build version and supported capabilities. Never touches the database. Use as a liveness probe.</p>
+      <CodeBlock id="api-version-ex">
+<span class="cm">{
+  "version": "{CURRENT_VERSION}",
+  "formats": ["json", "logfmt", "plain"],
+  "capabilities": ["query", "stats", "version"]
+}</span>
+      </CodeBlock>
+    </section>
+
+    <!-- QUERY LANGUAGE -->
+    <section id="query-language">
+      <h2>Query language</h2>
+      <p class="lede">Boolean expressions over fields, plus an optional trailing time window. Fields can be indexed columns (<code class="code-inline">timestamp</code>, <code class="code-inline">level</code>, <code class="code-inline">message</code>, <code class="code-inline">tag</code>) or arbitrary JSON paths (<code class="code-inline">user.id</code>, <code class="code-inline">request.method</code>).</p>
+
+      <h3>Grammar</h3>
+      <div class="grammar"><span class="nt">query</span>      <span class="tok">::=</span> <span class="nt">or_expr</span> [ <span class="nt">time_range</span> ]
+<span class="nt">or_expr</span>    <span class="tok">::=</span> <span class="nt">and_expr</span> ( <span class="tok">"OR"</span> <span class="nt">and_expr</span> )*
+<span class="nt">and_expr</span>   <span class="tok">::=</span> <span class="nt">clause</span> ( <span class="tok">"AND"</span> <span class="nt">clause</span> )*
+<span class="nt">clause</span>     <span class="tok">::=</span> <span class="nt">field</span> <span class="nt">op</span> <span class="nt">value</span> | <span class="nt">field</span> <span class="tok">"CONTAINS"</span> <span class="nt">string</span>
+<span class="nt">op</span>         <span class="tok">::=</span> <span class="tok">"="</span> | <span class="tok">"!="</span> | <span class="tok">">"</span> | <span class="tok">"&lt;"</span>
+<span class="nt">field</span>      <span class="tok">::=</span> <span class="nt">ident</span> ( <span class="tok">"."</span> <span class="nt">ident</span> )*
+<span class="nt">value</span>      <span class="tok">::=</span> <span class="nt">ident</span> | <span class="nt">number</span> | <span class="nt">quoted_string</span>
+<span class="nt">time_range</span> <span class="tok">::=</span> <span class="tok">"last"</span> <span class="nt">duration</span> | <span class="tok">"since"</span> <span class="nt">datetime</span>
+<span class="nt">duration</span>   <span class="tok">::=</span> <span class="nt">number</span> ( <span class="tok">"m"</span> | <span class="tok">"h"</span> | <span class="tok">"d"</span> )</div>
+      <p>Keywords are case-insensitive. Parenthesised expressions are not yet supported (planned for v0.3).</p>
+
+      <h3>Operators</h3>
+      <dl class="kv-list">
+        <dt>=</dt><dd>Exact match. Hits an index on known fields.</dd>
+        <dt>!=</dt><dd>Negation of <code class="code-inline">=</code>. Still indexed.</dd>
+        <dt>&gt;, &lt;</dt><dd>Numeric or lexicographic comparison.</dd>
+        <dt>CONTAINS</dt><dd>Case-insensitive substring match. Full-table scan on the target field.</dd>
+        <dt>AND</dt><dd>Binds clauses within a group. Tighter precedence than OR.</dd>
+        <dt>OR</dt><dd>Separates AND groups. Each group is evaluated independently.</dd>
+        <dt>last &lt;N&gt;m|h|d</dt><dd>Time window ending now.</dd>
+        <dt>since &lt;datetime&gt;</dt><dd>Absolute lower bound. RFC 3339, ISO naive datetime, or ISO date.</dd>
+      </dl>
+
+      <h3>Examples</h3>
+      <CodeBlock id="ql-ex">
+<span class="cm"># All errors from payments in the last 2 hours</span>
+level=error AND service=payments last 2h
+
+<span class="cm"># Errors OR warnings</span>
+level=error OR level=warn
+
+<span class="cm"># AND within each OR branch</span>
+level=error AND service=payments OR level=warn AND tag=worker
+
+<span class="cm"># Substring search on the message body</span>
+message contains <span class="str">"timeout"</span> last 24h
+
+<span class="cm"># Slow requests over 500ms</span>
+duration_ms &gt; 500
+
+<span class="cm"># Time range by absolute date</span>
+since 2026-04-15T09:00:00Z
+      </CodeBlock>
+    </section>
+
+    <!-- CONFIGURATION -->
+    <section id="configuration">
+      <h2>Configuration</h2>
+      <p>All configuration is via command-line flags, with environment-variable fallbacks for containerised deployments.</p>
+      <dl class="kv-list">
+        <dt>LOGDIVE_DB</dt>
+        <dd>Database path. Fallback for <code class="code-inline">--db</code>. Default <code class="code-inline">~/.logdive/index.db</code>.</dd>
+        <dt>LOGDIVE_LOG</dt>
+        <dd>Verbosity filter for internal diagnostics (<code class="code-inline">tracing_subscriber::EnvFilter</code>). Default <code class="code-inline">warn</code>.</dd>
+        <dt>LOGDIVE_API_PORT</dt>
+        <dd>Port for <code class="code-inline">logdive-api</code>. Fallback for <code class="code-inline">--port</code>. Default <code class="code-inline">4000</code>.</dd>
+        <dt>LOGDIVE_API_HOST</dt>
+        <dd>Bind host for <code class="code-inline">logdive-api</code>. Fallback for <code class="code-inline">--host</code>. Default <code class="code-inline">127.0.0.1</code>.</dd>
+        <dt>LOGDIVE_API_CORS_ORIGINS</dt>
+        <dd>Allowed CORS origins. Comma-separated list or <code class="code-inline">*</code>. Default: disabled.</dd>
+        <dt>NO_COLOR</dt>
+        <dd>Suppress ANSI colour in <code class="code-inline">logdive query</code> output when set.</dd>
+      </dl>
+    </section>
+
+    <!-- DOCKER -->
+    <section id="docker">
+      <h2>Docker</h2>
+      <p>Multi-arch images (linux/amd64 and linux/arm64) published to GHCR on every merge to main and every version tag.</p>
+      <CodeBlock id="dk-1">
+<span class="cm"># Start the API server</span>
+<span class="prompt">$</span> docker volume create logdive-data
+<span class="prompt">$</span> docker run -d \
+    --name logdive \
+    -v logdive-data:/data \
+    -p 4000:4000 \
+    ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION}
+      </CodeBlock>
+      <CodeBlock id="dk-2">
+<span class="cm"># Ingest with the CLI against the same volume</span>
+<span class="prompt">$</span> docker run --rm \
+    -v logdive-data:/data \
+    -v /path/to/your/logs:/logs:ro \
+    --entrypoint logdive \
+    ghcr.io/aryagorjipour/logdive:{CURRENT_VERSION} \
+    ingest --file /logs/app.log --tag production
+      </CodeBlock>
+      <p>Default entrypoint is <code class="code-inline">logdive-api</code>. The image pre-sets <code class="code-inline">LOGDIVE_DB=/data/index.db</code> and <code class="code-inline">LOGDIVE_API_HOST=0.0.0.0</code>. HEALTHCHECK on <code class="code-inline">GET /version</code>.</p>
+    </section>
+
+    <!-- ARCHITECTURE -->
+    <section id="architecture">
+      <h2>Architecture</h2>
+      <p>A Cargo workspace with three crates. <code class="code-inline">logdive-core</code> is publishable to crates.io as a standalone library.</p>
+      <CodeBlock id="arch-tree-docs">
+logdive/
+├── <span class="kw">logdive-core</span>     <span class="cm">// library: parsers, indexer, query AST+parser, executor</span>
+├── <span class="kw">logdive</span>          <span class="cm">// CLI binary — clap, follow mode, render, progress</span>
+└── <span class="kw">logdive-api</span>      <span class="cm">// HTTP server — axum, read-only, tokio</span>
+      </CodeBlock>
+      <h3>Storage model</h3>
+      <p>Hybrid schema: <code class="code-inline">timestamp</code>, <code class="code-inline">level</code>, <code class="code-inline">message</code>, <code class="code-inline">tag</code> are indexed columns. Everything else is stored in a <code class="code-inline">fields TEXT</code> JSON blob and queried at read time via SQLite's <code class="code-inline">json_extract()</code>. Deduplication uses a <code class="code-inline">raw_hash UNIQUE</code> column with blake3 hashes and <code class="code-inline">INSERT OR IGNORE</code>.</p>
+      <h3>Why SQLite</h3>
+      <p>Zero infrastructure. A single file, transactional, with a query planner that handles indexes, joins, and aggregates. The interesting work is the query parser and the storage schema; SQLite handles the rest.</p>
+      <h3>Why Rust</h3>
+      <p>Parsing log lines at 200k/s with near-zero GC budget. The ingest path is where Rust earns its place. The query path is mostly SQL.</p>
+    </section>
+
+  </main>
+</div>
+
+<script>
+  const docsNav = document.querySelector('.docs-nav');
+  if (docsNav) {
+    const links = Array.from(docsNav.querySelectorAll<HTMLAnchorElement>('a[href^="#"]'));
+    const sections = links
+      .map(a => document.getElementById(a.getAttribute('href')!.slice(1)))
+      .filter((s): s is HTMLElement => s !== null);
+
+    const observer = new IntersectionObserver(
+      entries => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            const id = entry.target.id;
+            links.forEach(a => a.classList.toggle('is-active', a.getAttribute('href') === `#${id}`));
+          }
+        });
+      },
+      { rootMargin: '-80px 0px -70% 0px', threshold: 0 }
+    );
+    sections.forEach(s => observer.observe(s));
+  }
+</script>
+
+</Base>
+```
+
+- [ ] **Step 2: Verify build**
+
+```bash
+cd landing && bun run build
+```
+
+Expected: `dist/logdive/docs/index.html` exists, no errors.
+
+- [ ] **Step 3: Smoke test**
+
+```bash
+cd landing && bun run preview
+```
+
+Open `http://localhost:4321/logdive/docs` — verify sidebar scroll-spy, all sections visible, copy buttons on code blocks work.
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /home/arysmart/Projects/Rust/logdive
+git add landing/src/pages/docs.astro
+git commit -m "feat(landing): implement docs page (README-accurate, v0.2.1)"
+```
+
+---
+
+## Task 9: About page (`about.astro`)
+
+**Files:**
+- Create: `landing/src/pages/about.astro`
+
+- [ ] **Step 1: Create `landing/src/pages/about.astro`**
+
+```astro
+---
+// landing/src/pages/about.astro
+import Base from '@layouts/Base.astro';
+---
+<Base
+  title="About — logdive"
+  description="Why logdive exists, what it isn't, and who built it."
+  activeNav="about"
+>
+<main>
+
+  <section class="tight">
+    <div class="wrap">
+      <span class="eyebrow">About</span>
+      <h1>Why logdive exists<span style="color: var(--accent);">.</span></h1>
+    </div>
+  </section>
+
+  <section class="tight">
+    <div class="wrap">
+      <div class="two-col">
+
+        <div class="prose">
+          <p>Every backend engineer has hit the same wall. Something went wrong in production three hours ago, and now there's a 2&thinsp;GB log file on a box somewhere, and you need to know which requests failed and what they had in common.</p>
+          <p>The options have always been a spectrum, and the spectrum has always been bad. On one end: <code class="code-inline">grep</code> piped into <code class="code-inline">jq</code> piped into <code class="code-inline">awk</code>, a shell incantation you rebuild from scratch every incident. On the other end: a full observability stack — Loki, Datadog, an Elastic cluster — with monthly bills, ingestion limits, and an entire infrastructure surface you don't want to maintain for a side project, a small team, or a single VPS.</p>
+          <p>logdive sits in that gap. It's the smallest tool that gives you indexes, time ranges, and a real query language, without asking you to provision anything. You install one binary, you point it at a log file, you query it later. That's the whole product.</p>
+          <p>Most existing systems start from "we need to ingest at scale" and work backwards into a usability story. logdive starts from the shell pipeline you'd write if you weren't tired, and works forwards — keeping the surface area roughly equivalent to a CLI you already know, but giving it persistence, structured fields, and time semantics.</p>
+          <p>If logdive does its job, you stop writing the same five-stage <code class="code-inline">jq</code> filter every time, and you stop paying someone to host the logs from your hobby Postgres instance. That's all it's trying to do.</p>
+        </div>
+
+        <aside class="nongoals" id="non-goals">
+          <h3>What logdive is <em>not</em></h3>
+          <p class="muted" style="font-size: 13px; margin-bottom: var(--space-4);">Framed honestly, so nobody is surprised six months in. None of these are on the v1 roadmap and most are explicit non-goals forever.</p>
+          <ul>
+            <li>No authentication on the API. Run it on localhost.</li>
+            <li>No HTTP ingestion endpoint. logdive reads files and stdin.</li>
+            <li>No multi-machine index. One DB, one host.</li>
+            <li>No log shipping agents, no sidecar, no daemon.</li>
+            <li>No browser UI. The CLI is the UI.</li>
+            <li>No hosted version. None planned, ever.</li>
+          </ul>
+        </aside>
+
+      </div>
+    </div>
+  </section>
+
+  <section class="tight">
+    <div class="wrap">
+      <hr style="margin-bottom: var(--space-12);" />
+      <div style="max-width: 56ch;">
+        <span class="eyebrow">Built by</span>
+        <h2 style="font-size: 28px; margin-bottom: var(--space-4);">Arya Gorjipour</h2>
+        <p class="muted" style="font-size: 16px;">
+          logdive is built and maintained by <a class="link-underline" href="https://github.com/Aryagorjipour" rel="noopener">@Aryagorjipour</a>, an Iranian Rust engineer. Written in Rust 2024 edition, MSRV 1.85. No company, no funding, no roadmap deck — just an engineer who got tired of writing the same <code class="code-inline">jq</code> filter twice.
+        </p>
+      </div>
+    </div>
+  </section>
+
+</main>
+</Base>
+```
+
+- [ ] **Step 2: Verify build**
+
+```bash
+cd landing && bun run build
+```
+
+Expected: `dist/logdive/about/index.html` exists, no errors.
+
+- [ ] **Step 3: Smoke test**
+
+```bash
+cd landing && bun run preview
+```
+
+Open `http://localhost:4321/logdive/about` — verify two-column layout, non-goals list, built-by section.
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /home/arysmart/Projects/Rust/logdive
+git add landing/src/pages/about.astro
+git commit -m "feat(landing): implement about page"
+```
+
+---
+
+## Task 10: GitHub Actions deploy workflow
+
+**Files:**
+- Create: `.github/workflows/landing.yml`
+
+- [ ] **Step 1: Create `.github/workflows/landing.yml`**
+
+```yaml
+name: Deploy landing page
+
+on:
+  push:
+    branches: [main]
+    paths: ['landing/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: landing
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        working-directory: landing
+        run: bun run build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: landing/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+```
+
+- [ ] **Step 2: Verify workflow file is valid YAML**
+
+```bash
+python3 -c "import yaml; yaml.safe_load(open('.github/workflows/landing.yml'))" && echo "valid"
+```
+
+Expected: `valid`
+
+- [ ] **Step 3: Commit**
+
+```bash
+cd /home/arysmart/Projects/Rust/logdive
+git add .github/workflows/landing.yml
+git commit -m "ci: add GitHub Actions workflow to deploy landing page"
+```
+
+---
+
+## Task 11: Final integration smoke test + polish
+
+**No new files.**
+
+- [ ] **Step 1: Full build**
+
+```bash
+cd landing && bun run build
+```
+
+Expected: no warnings, no errors.
+
+- [ ] **Step 2: Check all expected output files exist**
+
+```bash
+ls landing/dist/logdive/
+ls landing/dist/logdive/docs/
+ls landing/dist/logdive/about/
+```
+
+Expected: `index.html` in each directory.
+
+- [ ] **Step 3: Start preview and manually verify all pages**
+
+```bash
+cd landing && bun run preview
+```
+
+Check each URL:
+- `http://localhost:4321/logdive/` — hero renders, theme toggle works, all 8 sections present, install tab switches work, roadmap lanes show real data
+- `http://localhost:4321/logdive/docs` — sidebar sticky, scroll-spy highlights correct link, all copy buttons work, version number is 0.2.1 throughout
+- `http://localhost:4321/logdive/about` — two-column layout, non-goals list with × bullets, built-by section
+
+Check dark mode on each page: click toggle, verify `[data-theme="dark"]` applied, refresh — should persist.
+
+Check mobile (resize to 375px): nav collapses, hamburger opens it, stat grid stacks.
+
+- [ ] **Step 4: Fix any regressions found above**
+
+If any, fix inline and commit with `fix(landing): <description>`.
+
+- [ ] **Step 5: Final commit**
+
+```bash
+cd /home/arysmart/Projects/Rust/logdive
+git add -A
+git commit -m "feat(landing): complete landing page implementation v0.2.1"
+```
+
+---
+
+## Self-Review Against Spec
+
+| Spec section | Covered by |
+|---|---|
+| Astro 5 + Bun + TypeScript | Tasks 1, 2, 3 |
+| CSS design system (tokens, dark mode, typography) | Task 2 |
+| `src/data/roadmap.ts` typed data | Task 3 |
+| Base layout, Header, Footer components | Task 4 |
+| CodeBlock + Tabs interactive islands | Task 5 |
+| TerminalPreview + RoadmapStatus (build-time) | Task 6 |
+| Home page — all 8 sections | Task 7 |
+| Docs page — README-accurate, v0.2.1 flags only | Task 8 |
+| About page | Task 9 |
+| GitHub Actions Bun deploy workflow | Task 10 |
+| `base: '/logdive'` path prefix throughout | Tasks 1, 4 |
+| Dark mode persistence via localStorage | Task 4 (Header script) |
+| Mobile nav | Task 4 (Header script) |
+| Docs scroll-spy via IntersectionObserver | Task 8 |
+| Copy-to-clipboard with fallback | Task 5 |
+| Roadmap: v0.2.1, v0.2.0, v0.1.0 shipped data | Task 3 |
+| Version bump 0.2.0→0.2.1 throughout | Tasks 3, 7, 8 |
+| `prefers-reduced-motion` respected | Task 2 (global.css) |
+| Accessibility: semantic HTML, aria-label, aria-expanded | Tasks 4, 6, 7, 8, 9 |

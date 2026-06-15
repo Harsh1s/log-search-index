@@ -136,3 +136,4 @@ mod tests {
         assert!(msg.contains("not-a-date"));
         assert!(msg.contains("RFC3339"));
     }
+}

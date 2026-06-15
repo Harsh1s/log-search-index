@@ -361,3 +361,4 @@ mod tests {
             serde_json::json!(["query", "stats", "version"])
         );
     }
+}

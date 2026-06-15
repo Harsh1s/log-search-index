@@ -342,3 +342,176 @@ async fn shutdown_signal() {
         _ = ctrl_c => {
             tracing::info!("Ctrl-C received, shutting down");
         }
+        _ = terminate => {
+            tracing::info!("SIGTERM received, shutting down");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- ensure_index_exists -------------------------------------------
+
+    #[test]
+    fn ensure_index_exists_creates_db_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("new.db");
+        assert!(!db.exists());
+        ensure_index_exists(&db).expect("should create db");
+        assert!(db.exists(), "db file must exist after ensure_index_exists");
+    }
+
+    #[test]
+    fn ensure_index_exists_is_idempotent_when_db_already_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("existing.db");
+        let _ = Indexer::open(&db).unwrap();
+        // Second call must succeed without overwriting the file.
+        ensure_index_exists(&db).expect("should succeed on existing db");
+        assert!(db.exists());
+    }
+
+    #[test]
+    fn ensure_index_exists_creates_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("nested").join("dirs").join("index.db");
+        assert!(!db.parent().unwrap().exists());
+        ensure_index_exists(&db).expect("should create parent dirs and db");
+        assert!(db.exists());
+    }
+
+    #[test]
+    fn ensure_index_exists_created_db_is_queryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("queryable.db");
+        ensure_index_exists(&db).unwrap();
+        // Open read-only (as AppState does) and run stats — must return zero,
+        // not a schema error.
+        let idx = Indexer::open_read_only(&db).expect("open_read_only on created db");
+        let stats = idx.stats().expect("stats on empty db");
+        assert_eq!(stats.entries, 0);
+    }
+
+    // ----- parse_cors_origins --------------------------------------------
+
+    #[test]
+    fn parse_cors_origins_none_returns_empty() {
+        assert!(parse_cors_origins(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_cors_origins_empty_string_returns_empty() {
+        assert!(parse_cors_origins(Some(String::new())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_cors_origins_whitespace_only_returns_empty() {
+        assert!(
+            parse_cors_origins(Some("  , , ".to_string()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn parse_cors_origins_wildcard_returns_single_star_header() {
+        let result = parse_cors_origins(Some("*".to_string())).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_bytes(), b"*");
+    }
+
+    #[test]
+    fn parse_cors_origins_wildcard_with_whitespace_is_accepted() {
+        let result = parse_cors_origins(Some("  *  ".to_string())).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_bytes(), b"*");
+    }
+
+    #[test]
+    fn parse_cors_origins_wildcard_mixed_with_origin_is_error() {
+        let err = parse_cors_origins(Some("*,https://example.com".to_string())).unwrap_err();
+        assert!(err.contains('*'), "error message must mention the wildcard");
+    }
+
+    #[test]
+    fn parse_cors_origins_single_specific_origin() {
+        let result = parse_cors_origins(Some("https://app.example.com".to_string())).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "https://app.example.com");
+    }
+
+    #[test]
+    fn parse_cors_origins_multiple_specific_origins() {
+        let result = parse_cors_origins(Some(
+            "https://app.example.com, https://staging.example.com".to_string(),
+        ))
+        .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], "https://app.example.com");
+        assert_eq!(result[1], "https://staging.example.com");
+    }
+
+    #[test]
+    fn parse_cors_origins_trims_whitespace_around_each_entry() {
+        let result = parse_cors_origins(Some(
+            "  https://a.example.com , https://b.example.com  ".to_string(),
+        ))
+        .unwrap();
+        assert_eq!(result[0], "https://a.example.com");
+        assert_eq!(result[1], "https://b.example.com");
+    }
+
+    #[test]
+    fn parse_cors_origins_invalid_header_value_is_error() {
+        let err = parse_cors_origins(Some("https://ok.com,bad\nvalue".to_string())).unwrap_err();
+        assert!(
+            err.contains("bad\nvalue") || err.contains("bad"),
+            "error must identify the offending origin"
+        );
+    }
+
+    #[test]
+    fn parse_cors_origins_control_char_origin_is_rejected() {
+        // A null byte is not a valid HTTP header byte; parse must return Err
+        // and identify the offending origin in the message.
+        let result = parse_cors_origins(Some("https://ok.com,\x00evil".to_string()));
+        assert!(
+            result.is_err(),
+            "origin containing null byte must be rejected"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("not a valid HTTP header value"),
+            "error must identify the offending origin",
+        );
+    }
+
+    #[test]
+    fn cors_summary_disabled() {
+        assert_eq!(cors_summary(&[]), "disabled");
+    }
+
+    #[test]
+    fn cors_summary_wildcard() {
+        assert_eq!(
+            cors_summary(&[HeaderValue::from_static("*")]),
+            "any origin (*)"
+        );
+    }
+
+    #[test]
+    fn cors_summary_specific_origins() {
+        let origins: Vec<HeaderValue> = vec![
+            "https://a.example.com".parse().unwrap(),
+            "https://b.example.com".parse().unwrap(),
+        ];
+        assert_eq!(cors_summary(&origins), "2 specific origin(s)");
+    }
+}

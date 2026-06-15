@@ -354,3 +354,715 @@ fn insert_one_chunk(conn: &mut Connection, entries: &[LogEntry]) -> Result<Inser
                 stats.deduplicated += 1;
             } else {
                 stats.inserted += 1;
+            }
+        }
+    }
+
+    tx.commit()?;
+    Ok(stats)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Build a LogEntry whose `raw` is unique per input tuple, guaranteeing
+    /// a distinct `raw_hash` across calls (critical for the chunking test
+    /// where we insert thousands of entries).
+    fn make_entry(ts: &str, level: &str, message: &str) -> LogEntry {
+        let raw = format!(r#"{{"timestamp":"{ts}","level":"{level}","message":"{message}"}}"#);
+        let mut e = LogEntry::new(raw);
+        e.timestamp = Some(ts.to_string());
+        e.level = Some(level.to_string());
+        e.message = Some(message.to_string());
+        e
+    }
+
+    #[test]
+    fn open_in_memory_creates_table_and_three_indexes() {
+        let idx = Indexer::open_in_memory().expect("open in-memory");
+        let table_count: i64 = idx
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='table' AND name='log_entries'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 1);
+
+        let index_count: i64 = idx
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND name IN \
+                 ('idx_level','idx_tag','idx_timestamp','idx_level_norm')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index_count, 4);
+    }
+
+    #[test]
+    fn insert_batch_adds_rows_and_reports_stats() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        let entries = vec![
+            make_entry("2026-04-20T10:00:00Z", "info", "one"),
+            make_entry("2026-04-20T10:00:01Z", "error", "two"),
+        ];
+        let stats = idx.insert_batch(&entries).unwrap();
+
+        assert_eq!(stats.inserted, 2);
+        assert_eq!(stats.deduplicated, 0);
+        assert_eq!(stats.skipped_no_timestamp, 0);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn reinsert_is_deduplicated_by_raw_hash() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        let entries = vec![make_entry("2026-04-20T10:00:00Z", "info", "hello")];
+
+        let first = idx.insert_batch(&entries).unwrap();
+        assert_eq!(first.inserted, 1);
+        assert_eq!(first.deduplicated, 0);
+
+        let second = idx.insert_batch(&entries).unwrap();
+        assert_eq!(second.inserted, 0);
+        assert_eq!(second.deduplicated, 1);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn entries_without_timestamp_are_skipped_not_fabricated() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        let mut no_ts = LogEntry::new(r#"{"level":"info"}"#);
+        no_ts.level = Some("info".to_string());
+
+        let stats = idx.insert_batch(&[no_ts]).unwrap();
+        assert_eq!(stats.inserted, 0);
+        assert_eq!(stats.skipped_no_timestamp, 1);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn mixed_batch_counts_each_outcome_category() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "first")])
+            .unwrap();
+
+        let mut no_ts = LogEntry::new(r#"{"level":"warn"}"#);
+        no_ts.level = Some("warn".to_string());
+
+        let mixed = vec![
+            make_entry("2026-04-20T10:00:00Z", "info", "first"),
+            make_entry("2026-04-20T10:00:05Z", "error", "second"),
+            no_ts,
+        ];
+        let stats = idx.insert_batch(&mixed).unwrap();
+        assert_eq!(stats.inserted, 1);
+        assert_eq!(stats.deduplicated, 1);
+        assert_eq!(stats.skipped_no_timestamp, 1);
+    }
+
+    #[test]
+    fn fields_are_stored_as_json_queryable_via_json_extract() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        let mut e = make_entry("2026-04-20T10:00:00Z", "info", "hi");
+        e.fields.insert("service".to_string(), json!("payments"));
+        e.fields.insert("req_id".to_string(), json!(42));
+        idx.insert_batch(&[e]).unwrap();
+
+        let service: String = idx
+            .connection()
+            .query_row(
+                "SELECT json_extract(fields, '$.service') FROM log_entries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(service, "payments");
+
+        let req_id: i64 = idx
+            .connection()
+            .query_row(
+                "SELECT json_extract(fields, '$.req_id') FROM log_entries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(req_id, 42);
+    }
+
+    #[test]
+    fn empty_fields_round_trip_as_empty_json_object_not_null() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "x")])
+            .unwrap();
+
+        let stored: String = idx
+            .connection()
+            .query_row("SELECT fields FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, "{}");
+    }
+
+    #[test]
+    fn raw_hash_is_a_64_char_hex_blake3_digest() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "hash me")])
+            .unwrap();
+
+        let stored_hash: String = idx
+            .connection()
+            .query_row("SELECT raw_hash FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored_hash.len(), 64);
+        assert!(stored_hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn chunking_handles_batches_larger_than_batch_size() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        let total = BATCH_SIZE + 337;
+        let entries: Vec<_> = (0..total)
+            .map(|i| make_entry("2026-04-20T10:00:00Z", "info", &format!("message-{i}")))
+            .collect();
+
+        let stats = idx.insert_batch(&entries).unwrap();
+        assert_eq!(stats.inserted, total);
+        assert_eq!(stats.deduplicated, 0);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, total as i64);
+    }
+
+    #[test]
+    fn db_path_returns_override_verbatim() {
+        let p = Path::new("/tmp/logdive-test/override.db");
+        assert_eq!(
+            db_path(Some(p)),
+            PathBuf::from("/tmp/logdive-test/override.db")
+        );
+    }
+
+    #[test]
+    fn db_path_default_ends_with_standard_location() {
+        let default = db_path(None);
+        assert!(default.ends_with(".logdive/index.db"));
+    }
+
+    #[test]
+    fn open_creates_parent_directory_and_is_idempotent_across_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("sub").join("dir").join("index.db");
+
+        {
+            let mut idx = Indexer::open(&db).expect("first open");
+            idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "persist me")])
+                .unwrap();
+        }
+
+        {
+            let idx = Indexer::open(&db).expect("second open");
+            let count: i64 = idx
+                .connection()
+                .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+    }
+
+    #[test]
+    fn io_error_variant_attaches_parent_path() {
+        // If the parent directory cannot be created (e.g. because it lives
+        // under a regular file), we should get LogdiveError::Io with the
+        // offending path, not a SqliteFailure.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let bad_db = blocker.join("child").join("index.db");
+
+        let err = Indexer::open(&bad_db).unwrap_err();
+        match err {
+            LogdiveError::Io { path, .. } => {
+                assert!(path.starts_with(dir.path()));
+            }
+            other => panic!("expected Io variant, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // stats()
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn stats_empty_database_returns_zeroed_values() {
+        let idx = Indexer::open_in_memory().unwrap();
+        let stats = idx.stats().unwrap();
+
+        assert_eq!(stats.entries, 0);
+        assert_eq!(stats.min_timestamp, None);
+        assert_eq!(stats.max_timestamp, None);
+        assert!(stats.tags.is_empty());
+    }
+
+    #[test]
+    fn stats_counts_entries() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        let entries: Vec<_> = (0..5)
+            .map(|i| make_entry("2026-04-20T10:00:00Z", "info", &format!("msg-{i}")))
+            .collect();
+        idx.insert_batch(&entries).unwrap();
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.entries, 5);
+    }
+
+    #[test]
+    fn stats_timestamp_range_uses_lexical_min_and_max() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        // Insert intentionally out-of-order to confirm MIN/MAX, not insertion
+        // order, drives the bounds.
+        idx.insert_batch(&[
+            make_entry("2026-04-22T15:30:00Z", "error", "second"),
+            make_entry("2026-04-20T10:00:00Z", "info", "first"),
+            make_entry("2026-04-21T12:00:00Z", "warn", "third"),
+        ])
+        .unwrap();
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.min_timestamp.as_deref(), Some("2026-04-20T10:00:00Z"));
+        assert_eq!(stats.max_timestamp.as_deref(), Some("2026-04-22T15:30:00Z"));
+    }
+
+    #[test]
+    fn stats_distinct_tags_place_untagged_first_then_alphabetical() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+
+        // One untagged row.
+        let untagged = make_entry("2026-04-20T10:00:00Z", "info", "untagged-msg");
+
+        // Two distinct rows sharing tag "api" — must collapse via DISTINCT.
+        let mut api1 = make_entry("2026-04-20T10:00:01Z", "info", "api-msg-1");
+        api1.tag = Some("api".to_string());
+        let mut api2 = make_entry("2026-04-20T10:00:02Z", "info", "api-msg-2");
+        api2.tag = Some("api".to_string());
+
+        // One row with tag "payments".
+        let mut payments = make_entry("2026-04-20T10:00:03Z", "info", "payments-msg");
+        payments.tag = Some("payments".to_string());
+
+        idx.insert_batch(&[untagged, api1, api2, payments]).unwrap();
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.tags.len(), 3);
+        // NULL comes first in SQLite's ascending sort.
+        assert_eq!(stats.tags[0], None);
+        assert_eq!(stats.tags[1], Some("api".to_string()));
+        assert_eq!(stats.tags[2], Some("payments".to_string()));
+    }
+
+    #[test]
+    fn stats_entries_count_respects_dedup() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        // Two batches of the same entry — second is deduplicated away.
+        idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "dup")])
+            .unwrap();
+        idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "dup")])
+            .unwrap();
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+    }
+
+    #[test]
+    fn stats_entries_count_excludes_timestamp_less_entries() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+
+        let mut no_ts = LogEntry::new(r#"{"level":"info"}"#);
+        no_ts.level = Some("info".to_string());
+
+        idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "present"), no_ts])
+            .unwrap();
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+    }
+
+    // -----------------------------------------------------------------
+    // open_read_only()
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn open_read_only_errors_when_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.db");
+        let err = Indexer::open_read_only(&missing).unwrap_err();
+        // SQLite returns "unable to open database file" for missing paths in
+        // read-only mode; surfaced through `LogdiveError::Sqlite`.
+        assert!(matches!(err, LogdiveError::Sqlite(_)));
+    }
+
+    #[test]
+    fn open_read_only_can_read_existing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro.db");
+
+        // Populate via the writable opener.
+        {
+            let mut idx = Indexer::open(&db).unwrap();
+            idx.insert_batch(&[make_entry("2026-04-20T10:00:00Z", "info", "visible")])
+                .unwrap();
+        }
+
+        // Re-open read-only and read back.
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let count: i64 = ro
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let stats = ro.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+    }
+
+    #[test]
+    fn open_read_only_rejects_writes_at_sqlite_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-reject.db");
+
+        // Create and close.
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+
+        // Re-open RO and attempt a write via raw SQL — SQLite should block it.
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro.connection().execute(
+            "INSERT INTO log_entries (timestamp, raw, raw_hash) VALUES ('x', 'y', 'z')",
+            [],
+        );
+        assert!(result.is_err(), "read-only connection must reject writes");
+    }
+
+    #[test]
+    fn open_read_only_rejects_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-update.db");
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro
+            .connection()
+            .execute("UPDATE log_entries SET level = 'x' WHERE 1=0", []);
+        assert!(result.is_err(), "read-only connection must reject UPDATE");
+    }
+
+    #[test]
+    fn open_read_only_rejects_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-delete.db");
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro
+            .connection()
+            .execute("DELETE FROM log_entries WHERE 1=0", []);
+        assert!(result.is_err(), "read-only connection must reject DELETE");
+    }
+
+    #[test]
+    fn open_read_only_rejects_create_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-ddl.db");
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro
+            .connection()
+            .execute_batch("CREATE TABLE sec_test (x TEXT)");
+        assert!(
+            result.is_err(),
+            "read-only connection must reject CREATE TABLE"
+        );
+    }
+
+    #[test]
+    fn open_read_only_rejects_pragma_user_version_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("ro-pragma.db");
+        {
+            let _ = Indexer::open(&db).unwrap();
+        }
+        let ro = Indexer::open_read_only(&db).unwrap();
+        let result = ro.connection().execute_batch("PRAGMA user_version = 42");
+        assert!(
+            result.is_err(),
+            "read-only connection must reject PRAGMA writes"
+        );
+    }
+
+    #[test]
+    fn open_read_only_does_not_run_schema_migrations() {
+        // If `open_read_only` tried to CREATE IF NOT EXISTS anything, it
+        // would error against a read-only connection. Opening an empty DB
+        // that's NOT been initialized demonstrates open_read_only doesn't
+        // attempt writes of any kind.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("bare.db");
+
+        // Create a totally empty SQLite file (no schema).
+        {
+            let c = Connection::open(&db).unwrap();
+            // Ensure the file exists without creating the log_entries table.
+            c.execute_batch("PRAGMA user_version = 0;").unwrap();
+        }
+
+        // open_read_only must succeed (no migration attempt).
+        let ro = Indexer::open_read_only(&db).expect("open ro on bare db");
+
+        // Table is absent, so a SELECT errors — proving we didn't create it.
+        let err = ro
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| {
+                row.get::<_, i64>(0)
+            });
+        assert!(err.is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // prune()
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn prune_deletes_entries_strictly_older_than_cutoff() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-01T00:00:00Z", "info", "old one"),
+            make_entry("2026-04-10T00:00:00Z", "info", "old two"),
+            make_entry("2026-04-20T00:00:00Z", "info", "kept"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2026-04-15T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 2);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // The surviving row is the one newer than the cutoff.
+        let surviving: String = idx
+            .connection()
+            .query_row("SELECT message FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(surviving, "kept");
+    }
+
+    #[test]
+    fn prune_keeps_entry_exactly_at_cutoff() {
+        // The comparison is strict `<`, so a row whose timestamp equals the
+        // cutoff is retained, not deleted.
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[make_entry("2026-04-15T00:00:00Z", "info", "boundary")])
+            .unwrap();
+
+        let stats = idx.prune("2026-04-15T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 0);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn prune_on_empty_database_deletes_nothing() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        let stats = idx.prune("2026-04-15T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 0);
+    }
+
+    #[test]
+    fn prune_with_cutoff_before_all_entries_deletes_nothing() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-20T00:00:00Z", "info", "a"),
+            make_entry("2026-04-21T00:00:00Z", "info", "b"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 0);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn prune_with_cutoff_after_all_entries_deletes_all() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-20T00:00:00Z", "info", "a"),
+            make_entry("2026-04-21T00:00:00Z", "info", "b"),
+            make_entry("2026-04-22T00:00:00Z", "info", "c"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2027-01-01T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 3);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn prune_returns_accurate_deleted_count() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        // Ten entries, one per day from the 1st to the 10th.
+        let entries: Vec<_> = (1..=10)
+            .map(|day| {
+                make_entry(
+                    &format!("2026-04-{day:02}T00:00:00Z"),
+                    "info",
+                    &format!("day-{day}"),
+                )
+            })
+            .collect();
+        idx.insert_batch(&entries).unwrap();
+
+        // Cutoff at the 6th deletes days 1-5 (strictly older): 5 rows.
+        let stats = idx.prune("2026-04-06T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 5);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn prune_then_stats_reflects_deletion() {
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-01T00:00:00Z", "info", "gone"),
+            make_entry("2026-04-20T00:00:00Z", "info", "stays"),
+        ])
+        .unwrap();
+
+        idx.prune("2026-04-10T00:00:00Z").unwrap();
+
+        let stats = idx.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.min_timestamp.as_deref(), Some("2026-04-20T00:00:00Z"));
+        assert_eq!(stats.max_timestamp.as_deref(), Some("2026-04-20T00:00:00Z"));
+    }
+
+    #[test]
+    fn prune_works_on_disk_backed_index() {
+        // VACUUM exercises a different code path on-disk than in-memory;
+        // run the real on-disk path to confirm DELETE + VACUUM both succeed.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("prune.db");
+        let mut idx = Indexer::open(&db).unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-01T00:00:00Z", "info", "old"),
+            make_entry("2026-04-20T00:00:00Z", "info", "new"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2026-04-10T00:00:00Z").unwrap();
+        assert_eq!(stats.deleted, 1);
+
+        let count: i64 = idx
+            .connection()
+            .query_row("SELECT COUNT(*) FROM log_entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn prune_one_second_boundary_deletes_only_strictly_older() {
+        // Two rows 1 second apart; cutoff is the older one's timestamp.
+        // Only the row strictly before the cutoff must be deleted.
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-20T10:00:00Z", "info", "at-cutoff"),
+            make_entry("2026-04-20T10:00:01Z", "info", "one-second-later"),
+        ])
+        .unwrap();
+
+        let stats = idx.prune("2026-04-20T10:00:00Z").unwrap();
+        assert_eq!(
+            stats.deleted, 0,
+            "row at cutoff must be retained (strict <)"
+        );
+
+        let stats = idx.prune("2026-04-20T10:00:01Z").unwrap();
+        assert_eq!(
+            stats.deleted, 1,
+            "row strictly before the second cutoff must be deleted"
+        );
+    }
+
+    #[test]
+    fn prune_idempotent_second_prune_with_same_cutoff_deletes_nothing() {
+        // After the first prune removes all eligible rows, a second prune
+        // with the same cutoff must report 0 deleted — nothing left to remove.
+        let mut idx = Indexer::open_in_memory().unwrap();
+        idx.insert_batch(&[
+            make_entry("2026-04-01T00:00:00Z", "info", "old"),
+            make_entry("2026-04-20T00:00:00Z", "info", "keep"),
+        ])
+        .unwrap();
+
+        let first = idx.prune("2026-04-10T00:00:00Z").unwrap();
+        assert_eq!(first.deleted, 1);
+
+        let second = idx.prune("2026-04-10T00:00:00Z").unwrap();
+        assert_eq!(
+            second.deleted, 0,
+            "re-pruning same cutoff must delete nothing"
+        );
+    }
+}

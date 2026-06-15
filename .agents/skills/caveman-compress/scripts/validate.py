@@ -140,3 +140,74 @@ def validate_paths(orig, comp, result):
 
 def validate_bullets(orig, comp, result):
     b1 = count_bullets(orig)
+    b2 = count_bullets(comp)
+
+    if b1 == 0:
+        return
+
+    diff = abs(b1 - b2) / b1
+
+    if diff > 0.15:
+        result.add_warning(f"Bullet count changed too much: {b1} -> {b2}")
+
+
+def validate_inline_codes(orig, comp, result):
+    c1 = Counter(extract_inline_codes(orig))
+    c2 = Counter(extract_inline_codes(comp))
+
+    if c1 != c2:
+        lost = set(c1.keys()) - set(c2.keys())
+        added = set(c2.keys()) - set(c1.keys())
+        for code, count in c1.items():
+            if code in c2 and c2[code] < count:
+                lost.add(f"{code} (lost {count - c2[code]} of {count} occurrences)")
+        if lost:
+            result.add_error(f"Inline code lost: {lost}")
+        if added:
+            result.add_warning(f"Inline code added: {added}")
+
+
+# ---------- Main ----------
+
+
+def validate(original_path: Path, compressed_path: Path) -> ValidationResult:
+    result = ValidationResult()
+
+    orig = read_file(original_path)
+    comp = read_file(compressed_path)
+
+    validate_headings(orig, comp, result)
+    validate_code_blocks(orig, comp, result)
+    validate_urls(orig, comp, result)
+    validate_paths(orig, comp, result)
+    validate_bullets(orig, comp, result)
+    validate_inline_codes(orig, comp, result)
+
+    return result
+
+
+# ---------- CLI ----------
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) != 3:
+        print("Usage: python validate.py <original> <compressed>")
+        sys.exit(1)
+
+    orig = Path(sys.argv[1]).resolve()
+    comp = Path(sys.argv[2]).resolve()
+
+    res = validate(orig, comp)
+
+    print(f"\nValid: {res.is_valid}")
+
+    if res.errors:
+        print("\nErrors:")
+        for e in res.errors:
+            print(f"  - {e}")
+
+    if res.warnings:
+        print("\nWarnings:")
+        for w in res.warnings:
+            print(f"  - {w}")
